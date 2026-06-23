@@ -57,7 +57,7 @@ export class TorrentEngine {
         return Promise.resolve({ infoHash: existing.infoHash, name: existing.name, files });
       }
       const clientTorrent = this.client.get(infoHash);
-      if (clientTorrent) {
+      if (clientTorrent && clientTorrent.files) {
         console.log(`[torrent] found in WebTorrent client: ${infoHash}`);
         this.torrents.set(infoHash, clientTorrent);
         const files = clientTorrent.files.map((f, i) => ({
