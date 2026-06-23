@@ -46,6 +46,27 @@ export class TorrentEngine {
       return this.pending.get(key);
     }
 
+    const infoHash = this._parseInfoHash(uri);
+    if (infoHash) {
+      const existing = this.torrents.get(infoHash);
+      if (existing) {
+        console.log(`[torrent] reusing existing: ${infoHash}`);
+        const files = existing.files.map((f, i) => ({
+          index: i, name: f.name, length: f.length, type: this._getFileType(f.name),
+        }));
+        return Promise.resolve({ infoHash: existing.infoHash, name: existing.name, files });
+      }
+      const clientTorrent = this.client.get(infoHash);
+      if (clientTorrent) {
+        console.log(`[torrent] found in WebTorrent client: ${infoHash}`);
+        this.torrents.set(infoHash, clientTorrent);
+        const files = clientTorrent.files.map((f, i) => ({
+          index: i, name: f.name, length: f.length, type: this._getFileType(f.name),
+        }));
+        return Promise.resolve({ infoHash: clientTorrent.infoHash, name: clientTorrent.name, files });
+      }
+    }
+
     if (this.torrents.size >= 3) {
       const oldest = this.torrents.keys().next().value;
       console.log(`[torrent] evicting oldest: ${oldest}`);
@@ -187,5 +208,10 @@ export class TorrentEngine {
     if (audioExts.includes(ext)) return 'audio';
     if (subExts.includes(ext)) return 'subtitle';
     return 'other';
+  }
+
+  _parseInfoHash(uri) {
+    const m = uri.match(/[?&]xt=urn:btih:([a-fA-F0-9]{40})/);
+    return m ? m[1].toLowerCase() : null;
   }
 }

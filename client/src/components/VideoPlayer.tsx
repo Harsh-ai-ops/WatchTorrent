@@ -277,7 +277,17 @@ export default function VideoPlayer({ streamUrl, roomId, userName, subtitleUrls:
             </div>
             <p className="text-zinc-300 text-sm">Waiting for data from peers...</p>
             <button
-              onClick={() => { const v = videoRef.current; if (v) { v.src = streamUrl.split('?')[0] + '?_=' + Date.now(); v.load(); setStalled(false); } }}
+              onClick={() => {
+                const v = videoRef.current;
+                if (!v) return;
+                v.src = '';
+                v.load();
+                setTimeout(() => {
+                  v.src = streamUrl.split('?')[0] + '?_=' + Date.now();
+                  v.load();
+                  setStalled(false);
+                }, 100);
+              }}
               className="px-3 py-1.5 text-xs bg-purple-600 hover:bg-purple-500 rounded-lg transition-colors cursor-pointer"
             >
               Retry stream
