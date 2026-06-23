@@ -44,7 +44,7 @@ const roomManager = new RoomManager();
 const torrentEngine = new TorrentEngine();
 const chatService = new ChatService(io, roomManager);
 
-PeerServer({ port: 9000, path: '/peerjs' });
+PeerServer({ server, path: '/peerjs' });
 
 io.on('connection', (socket) => {
   console.log(`[connect] ${socket.id}`);
