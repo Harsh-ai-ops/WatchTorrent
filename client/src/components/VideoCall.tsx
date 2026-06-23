@@ -35,12 +35,7 @@ export default function VideoCall({ roomId, userName }: VideoCallProps) {
     setConnecting(true);
     setCallError('');
 
-    const p = new Peer(`watchtorrent-${socket.id}`, {
-      path: '/peerjs',
-      host: window.location.hostname,
-      port: window.location.port ? parseInt(window.location.port) : 443,
-      secure: window.location.protocol === 'https:',
-    });
+    const p = new Peer(`watchtorrent-${socket.id}`);
     peerRef.current = p;
 
     p.on('open', (id) => {

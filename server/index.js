@@ -7,7 +7,6 @@ import { fileURLToPath } from 'url';
 import { RoomManager } from './room-manager.js';
 import { TorrentEngine } from './torrent-engine.js';
 import { ChatService } from './chat-service.js';
-import { PeerServer } from 'peer';
 
 process.on('uncaughtException', (err) => {
   const msg = err?.message || '';
@@ -44,8 +43,6 @@ const roomManager = new RoomManager();
 const torrentEngine = new TorrentEngine();
 const chatService = new ChatService(io, roomManager);
 
-PeerServer({ server, path: '/peerjs' });
-
 io.on('connection', (socket) => {
   console.log(`[connect] ${socket.id}`);
 
@@ -67,7 +64,19 @@ io.on('connection', (socket) => {
     io.to(roomId).emit('user-joined', { users, userId: socket.id, name: name || 'Anonymous' });
     const messages = chatService.getRoomMessages(roomId);
     socket.emit('chat-messages', messages);
-    callback({ roomId, users, messages });
+    const torrent = roomManager.getTorrentInfo(roomId);
+    callback({ roomId, users, messages, torrent });
+
+    if (torrent) {
+      socket.emit('torrent-ready', {
+        infoHash: torrent.infoHash,
+        name: torrent.name,
+        files: torrent.files,
+      });
+      if (torrent.selectedFile) {
+        socket.emit('file-selected', { file: torrent.selectedFile });
+      }
+    }
   });
 
   socket.on('start-torrent', async (data, callback) => {

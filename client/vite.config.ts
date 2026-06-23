@@ -9,7 +9,6 @@ export default defineConfig({
       '/socket.io': { target: 'http://localhost:3000', ws: true },
       '/stream': 'http://localhost:3000',
       '/subtitle': 'http://localhost:3000',
-      '/peerjs': { target: 'http://localhost:3000', ws: true },
       '/api': 'http://localhost:3000',
     },
   },

@@ -281,14 +281,19 @@ export default function Room({ roomId, userName, onLeave }: RoomProps) {
         </div>
 
         {sidebarOpen && activePanel && (
-          <aside className="w-80 bg-zinc-900 border-l border-zinc-800 flex flex-col shrink-0 max-md:absolute max-md:right-0 max-md:top-12 max-md:bottom-0 max-md:w-72 max-md:z-10 max-md:shadow-2xl">
-            <div className="flex items-center justify-between p-3 border-b border-zinc-800">
-              <span className="text-sm font-medium text-zinc-300">
-                {activePanel === 'chat' && 'Chat'}
-                {activePanel === 'users' && `Users (${users.length})`}
-                {activePanel === 'call' && 'Video Call'}
-              </span>
-            </div>
+          <>
+            <div className="fixed inset-0 bg-black/50 z-10 md:hidden" onClick={() => setActivePanel(null)} />
+            <aside className="w-80 bg-zinc-900 border-l border-zinc-800 flex flex-col shrink-0 max-md:fixed max-md:right-0 max-md:top-12 max-md:bottom-0 max-md:w-80 max-md:z-20 max-md:shadow-2xl max-md:animate-slide-in">
+              <div className="flex items-center justify-between p-3 border-b border-zinc-800">
+                <span className="text-sm font-medium text-zinc-300">
+                  {activePanel === 'chat' && 'Chat'}
+                  {activePanel === 'users' && `Users (${users.length})`}
+                  {activePanel === 'call' && 'Video Call'}
+                </span>
+                <button onClick={() => setActivePanel(null)} className="text-zinc-500 hover:text-white p-1 cursor-pointer md:hidden">
+                  ✕
+                </button>
+              </div>
             <div className="flex-1 overflow-hidden">
               {activePanel === 'chat' && <Chat roomId={roomId} />}
               {activePanel === 'users' && (
@@ -308,6 +313,7 @@ export default function Room({ roomId, userName, onLeave }: RoomProps) {
               {activePanel === 'call' && <VideoCall roomId={roomId} userName={userName} />}
             </div>
           </aside>
+          </>
         )}
       </div>
     </div>
