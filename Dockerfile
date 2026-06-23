@@ -2,6 +2,10 @@ FROM node:20-slim
 
 WORKDIR /app
 
+# ffmpeg/ffprobe for on-the-fly transcoding (PATH fallback if the npm static
+# binaries fail to download during install).
+RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg && rm -rf /var/lib/apt/lists/*
+
 COPY server/package*.json ./server/
 RUN cd server && npm install
 

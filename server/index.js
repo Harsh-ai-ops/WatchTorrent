@@ -7,14 +7,19 @@ import { fileURLToPath } from 'url';
 import { ExpressPeerServer } from 'peer';
 import { WebSocketServer } from 'ws';
 import { spawn } from 'child_process';
-import ffmpegPath from 'ffmpeg-static';
-import ffprobeStatic from 'ffprobe-static';
+import fs from 'fs';
 import { RoomManager } from './room-manager.js';
 import { TorrentEngine } from './torrent-engine.js';
 import { ChatService } from './chat-service.js';
 
-const FFMPEG = ffmpegPath;
-const FFPROBE = ffprobeStatic.path;
+// Prefer the bundled static binaries (ideal for local dev); fall back to ffmpeg/
+// ffprobe on PATH (apt-installed in the Docker image) so a failed binary
+// download during `npm install` never takes the whole app down on Hugging Face.
+let FFMPEG = 'ffmpeg';
+let FFPROBE = 'ffprobe';
+try { const m = await import('ffmpeg-static'); if (m.default && fs.existsSync(m.default)) FFMPEG = m.default; } catch { /* use PATH */ }
+try { const m = await import('ffprobe-static'); if (m.default?.path && fs.existsSync(m.default.path)) FFPROBE = m.default.path; } catch { /* use PATH */ }
+console.log(`[ffmpeg] using ${FFMPEG === 'ffmpeg' ? 'system PATH' : 'bundled static'} binary`);
 const PORT = process.env.PORT || 3000;
 
 process.on('uncaughtException', (err) => {
