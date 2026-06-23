@@ -144,6 +144,21 @@ export class TorrentEngine {
     return torrent ? torrent.numPeers : 0;
   }
 
+  waitForData(infoHash, offset, timeoutMs) {
+    return new Promise((resolve, reject) => {
+      const torrent = this.torrents.get(infoHash);
+      if (!torrent) { resolve(); return; }
+      if (torrent.done || torrent.downloaded > offset + 5 * 1024 * 1024) { resolve(); return; }
+      const check = setInterval(() => {
+        if (torrent.done || torrent.downloaded > offset + 5 * 1024 * 1024) {
+          clearInterval(check);
+          resolve();
+        }
+      }, 500);
+      setTimeout(() => { clearInterval(check); resolve(); }, timeoutMs);
+    });
+  }
+
   removeTorrent(infoHash) {
     const torrent = this.torrents.get(infoHash);
     if (torrent) {

@@ -67,6 +67,7 @@ export default function VideoPlayer({ streamUrl, roomId, userName, subtitleUrls:
     function onRate() { setRate(vv.playbackRate); }
     function onWaiting() { setStalled(true); }
     function onCanPlay() { setStalled(false); }
+    function onLoadStart() { setStalled(true); }
 
     vv.addEventListener('play', onPlay);
     vv.addEventListener('pause', onPause);
@@ -77,6 +78,7 @@ export default function VideoPlayer({ streamUrl, roomId, userName, subtitleUrls:
     vv.addEventListener('waiting', onWaiting);
     vv.addEventListener('canplay', onCanPlay);
     vv.addEventListener('canplaythrough', onCanPlay);
+    vv.addEventListener('loadstart', onLoadStart);
     return () => {
       vv.removeEventListener('play', onPlay);
       vv.removeEventListener('pause', onPause);
@@ -87,6 +89,7 @@ export default function VideoPlayer({ streamUrl, roomId, userName, subtitleUrls:
       vv.removeEventListener('waiting', onWaiting);
       vv.removeEventListener('canplay', onCanPlay);
       vv.removeEventListener('canplaythrough', onCanPlay);
+      vv.removeEventListener('loadstart', onLoadStart);
     };
   }, [socket]);
 

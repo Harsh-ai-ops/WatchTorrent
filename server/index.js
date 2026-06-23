@@ -232,7 +232,7 @@ app.get('/subtitle/:infoHash/:fileIndex', (req, res) => {
   }
 });
 
-app.get('/stream/:infoHash/:fileIndex', (req, res) => {
+app.get('/stream/:infoHash/:fileIndex', async (req, res) => {
   const { infoHash, fileIndex } = req.params;
   const file = torrentEngine.getFile(infoHash, parseInt(fileIndex));
   if (!file) return res.status(404).json({ error: 'File not found' });
@@ -245,6 +245,12 @@ app.get('/stream/:infoHash/:fileIndex', (req, res) => {
   const start = range ? parseInt(range.replace(/bytes=/, '').split('-')[0], 10) : 0;
   const end = range ? (range.split('-')[1] ? parseInt(range.split('-')[1], 10) : file.length - 1) : file.length - 1;
   const chunkSize = end - start + 1;
+
+  try {
+    await torrentEngine.waitForData(infoHash, start, 5000);
+  } catch {
+    /* no data after timeout, continue anyway */
+  }
 
   try {
     if (range) {
