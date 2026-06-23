@@ -35,14 +35,17 @@ export class TorrentEngine {
     this.client = new WebTorrent({
       dht: { bootstrap: DHT_BOOTSTRAP },
       tracker: true,
-      maxConns: 100,
-      utp: true,
+      maxConns: 200,
+      // µTP is UDP-based; many hosts (incl. Hugging Face Spaces) block UDP, so
+      // it just wastes connection attempts. Stick to TCP, which works outbound.
+      utp: false,
       upload: true,
       download: true,
       webSeeds: true,
     });
     this.torrents = new Map();
     this.pending = new Map();
+    this._selected = new Map(); // infoHash -> last selected fileIndex (dedupe)
   }
 
   async addTorrent(uri) {
@@ -176,18 +179,17 @@ export class TorrentEngine {
     return torrent ? torrent.numPeers : 0;
   }
 
-  // Focus download bandwidth on the file being streamed. Other large video
-  // files are deselected so throughput isn't wasted on them; small files
-  // (subtitles) stay selected so they're ready when requested.
+  // Prioritise the file being streamed. We only ever ADD a selection (never
+  // deselect — deselecting the default whole-torrent selection can stop the
+  // download entirely on some torrents), and do it once per file to avoid
+  // piling up duplicate selections on every range request.
   selectFile(infoHash, fileIndex) {
+    if (this._selected.get(infoHash) === fileIndex) return;
     const torrent = this.torrents.get(infoHash);
-    if (!torrent || !torrent.files) return;
-    torrent.files.forEach((f, i) => {
-      try {
-        if (i === fileIndex || f.length < 5 * 1024 * 1024) f.select();
-        else f.deselect();
-      } catch { /* ignore */ }
-    });
+    const file = torrent?.files?.[fileIndex];
+    if (!file) return;
+    this._selected.set(infoHash, fileIndex);
+    try { file.select(); } catch { /* ignore */ }
   }
 
   // Wait until the pieces backing `start` (plus a small read-ahead) actually
@@ -233,6 +235,7 @@ export class TorrentEngine {
       console.log(`[torrent] destroying: ${infoHash}`);
       try { torrent.destroy(); } catch {}
       this.torrents.delete(infoHash);
+      this._selected.delete(infoHash);
     }
   }
 

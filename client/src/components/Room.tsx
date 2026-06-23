@@ -35,7 +35,7 @@ export default function Room({ roomId, userName, onLeave }: RoomProps) {
   const [streamUrl, setStreamUrl] = useState('');
   const [torrentLoading, setTorrentLoading] = useState(false);
   const [torrentError, setTorrentError] = useState('');
-  const [torrentProgress, setTorrentProgress] = useState<{ peers: number; progress: number; speed: number } | null>(null);
+  const [torrentProgress, setTorrentProgress] = useState<{ peers: number; progress: number; speed: number; downloaded: number } | null>(null);
   // On phones the sidebar is a full-height overlay, so start it closed (showing
   // the video first); on desktop it sits beside the video, so start on chat.
   const [activePanel, setActivePanel] = useState<'chat' | 'users' | 'call' | null>(
@@ -86,7 +86,7 @@ export default function Room({ roomId, userName, onLeave }: RoomProps) {
     };
 
     const onProgress = (data: any) => {
-      setTorrentProgress({ peers: data.peers, progress: data.progress, speed: data.speed });
+      setTorrentProgress({ peers: data.peers, progress: data.progress, speed: data.speed, downloaded: data.downloaded });
     };
 
     // Socket.IO assigns a fresh id after a reconnect, so the server no longer
@@ -281,6 +281,7 @@ export default function Room({ roomId, userName, onLeave }: RoomProps) {
                 roomId={roomId}
                 userName={userName}
                 fileName={selectedFile?.name}
+                progress={torrentProgress}
                 subtitleUrls={torrentInfoHash ? files
                   .filter((f) => f.type === 'subtitle')
                   .map((f) => ({

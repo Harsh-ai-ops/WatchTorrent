@@ -7,6 +7,7 @@ interface VideoPlayerProps {
   roomId: string;
   userName: string;
   fileName?: string;
+  progress?: { peers: number; speed: number; downloaded?: number; progress?: number } | null;
   subtitleUrls?: { label: string; url: string }[];
 }
 
@@ -27,7 +28,7 @@ const RATES = [0.25, 0.5, 0.75, 1, 1.25, 1.5, 2, 3];
 const SKIP = 10;
 const BIG_SKIP = 30;
 
-export default function VideoPlayer({ streamUrl, roomId, userName, fileName, subtitleUrls: _subUrls }: VideoPlayerProps) {
+export default function VideoPlayer({ streamUrl, roomId, userName, fileName, progress, subtitleUrls: _subUrls }: VideoPlayerProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const progressRef = useRef<HTMLDivElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -35,6 +36,7 @@ export default function VideoPlayer({ streamUrl, roomId, userName, fileName, sub
   const lastSync = useRef(0);
   const requestedSync = useRef(false);
   const autoRetries = useRef(0);
+  const transcodeFails = useRef(0);
   // Refs mirror render state so the imperative helpers (seek/sync/keyboard) read
   // live values even when captured in long-lived closures.
   const baseRef = useRef(0);
@@ -162,6 +164,7 @@ export default function VideoPlayer({ streamUrl, roomId, userName, fileName, sub
       setStalled(false);
       setLoadError('');
       autoRetries.current = 0;
+      transcodeFails.current = 0;
       if (resumePlayRef.current) { resumePlayRef.current = false; vv.play().catch(() => {}); }
       // First time we can actually play, ask the room where playback is so a
       // new joiner snaps into sync with everyone else.
@@ -181,14 +184,20 @@ export default function VideoPlayer({ streamUrl, roomId, userName, fileName, sub
     }
     function onErr() {
       const code = vv.error?.code;
-      if (code === 4 /* MEDIA_ERR_SRC_NOT_SUPPORTED */ || code === 3 /* DECODE */) {
-        if (!transcodeRef.current) {
-          // Browser can't decode the raw file — fall back to server transcoding.
-          setForceTranscode(true);
-        } else {
-          setStalled(false);
-          setLoadError("Couldn't play this video even after converting it. The file may be corrupt or use an unsupported codec.");
-        }
+      if (code !== 4 /* SRC_NOT_SUPPORTED */ && code !== 3 /* DECODE */) return;
+      if (!transcodeRef.current) {
+        // Browser can't decode the raw file — fall back to server transcoding.
+        setForceTranscode(true);
+        return;
+      }
+      // Transcode produced an unplayable/empty stream — usually transient (no
+      // data yet on a slow swarm). Retry a couple times before giving up.
+      if (transcodeFails.current < 2) {
+        transcodeFails.current += 1;
+        reloadSegment(baseRef.current, !vv.paused);
+      } else {
+        setStalled(false);
+        setLoadError("Still couldn't play this after converting — the torrent may have no data yet, or the file is corrupt / an unsupported codec. Try Retry, or a better-seeded source.");
       }
     }
 
@@ -300,14 +309,9 @@ export default function VideoPlayer({ streamUrl, roomId, userName, fileName, sub
     }
   }, []);
 
-  // Auto-recover from a sustained stall a few times before leaving it to the user.
-  useEffect(() => {
-    if (!stalled) return;
-    const t = setTimeout(() => {
-      if (autoRetries.current < 3) { autoRetries.current += 1; retryStream(); }
-    }, 12000);
-    return () => clearTimeout(t);
-  }, [stalled, retryStream]);
+  // NOTE: no automatic reload-on-stall. Reloading restarts the byte stream from
+  // scratch, which on a slow swarm means it never finishes buffering — the user
+  // can hit "Retry" manually (and it preserves position). We just wait for data.
 
   function playPause() {
     const v = el();
@@ -519,8 +523,17 @@ export default function VideoPlayer({ streamUrl, roomId, userName, fileName, sub
               <div className="w-2 h-2 bg-purple-400 rounded-full typing-dot" style={{animationDelay:'0.4s'}} />
             </div>
             <p className="text-zinc-300 text-sm">
-              {transcode ? `Converting ${ext ? '.' + ext : 'video'} for your browser…` : 'Waiting for data from peers...'}
+              {transcode
+                ? `Converting ${ext ? '.' + ext : 'video'} for your browser…`
+                : (progress && progress.peers > 0 ? 'Buffering…' : 'Connecting to peers…')}
             </p>
+            {progress && (
+              <p className="text-zinc-500 text-xs tabular-nums">
+                {progress.peers} peer{progress.peers === 1 ? '' : 's'}
+                {progress.speed > 0 ? ` · ${(progress.speed / 1024 / 1024).toFixed(2)} MB/s` : ''}
+                {typeof progress.downloaded === 'number' && progress.downloaded > 0 ? ` · ${(progress.downloaded / 1024 / 1024).toFixed(0)} MB in` : ''}
+              </p>
+            )}
             <button
               onClick={retryStream}
               className="px-3 py-1.5 text-xs bg-purple-600 hover:bg-purple-500 rounded-lg transition-colors cursor-pointer"

@@ -41,7 +41,6 @@ function peerOptions() {
     port,
     path: '/peerjs',
     secure,
-    config: { iceServers: ICE_SERVERS },
   };
 }
 
@@ -63,10 +62,19 @@ export default function VideoCall({ roomId, userName }: VideoCallProps) {
   const pendingRef = useRef<Map<string, string>>(new Map());
   const namesRef = useRef<Map<string, string>>(new Map());
   const announcedRef = useRef<Set<string>>(new Set());
+  const iceRef = useRef<RTCIceServer[]>(ICE_SERVERS);
   const socket = getSocket();
 
   const refreshPeers = useCallback(() => {
     setPeers(Array.from(peersRef.current.values()));
+  }, []);
+
+  // Pull ICE servers (incl. any env-configured TURN) from the server once.
+  useEffect(() => {
+    fetch('/api/ice')
+      .then((r) => (r.ok ? r.json() : null))
+      .then((j) => { if (j && Array.isArray(j.iceServers) && j.iceServers.length) iceRef.current = j.iceServers; })
+      .catch(() => { /* keep built-in defaults */ });
   }, []);
 
   useEffect(() => {
@@ -76,7 +84,7 @@ export default function VideoCall({ roomId, userName }: VideoCallProps) {
     setCallError('');
 
     const myPeerId = `watchtorrent-${socket.id}`;
-    const p = new Peer(myPeerId, peerOptions());
+    const p = new Peer(myPeerId, { ...peerOptions(), config: { iceServers: iceRef.current } });
     peerRef.current = p;
 
     const wireCall = (call: MediaConnection, peerId: string, name: string) => {
@@ -94,15 +102,20 @@ export default function VideoCall({ roomId, userName }: VideoCallProps) {
         pendingRef.current.delete(peerId);
         refreshPeers();
       });
-      // Drop a tile only once the underlying ICE connection truly fails/closes
-      // ('disconnected' can recover, so we don't act on it).
+      // Only remove a tile when the connection is actually CLOSED (peer left).
+      // We deliberately do NOT remove on 'failed' — without a TURN server, ICE
+      // commonly reports 'failed' on restrictive NATs, and dropping the tile
+      // there is what made participants vanish. Keep them and try an ICE restart.
       const pc = call.peerConnection;
       if (pc) {
         pc.addEventListener('iceconnectionstatechange', () => {
-          if (pc.iceConnectionState === 'failed' || pc.iceConnectionState === 'closed') {
+          const st = pc.iceConnectionState;
+          if (st === 'closed') {
             peersRef.current.delete(peerId);
             pendingRef.current.delete(peerId);
             refreshPeers();
+          } else if (st === 'failed') {
+            try { pc.restartIce?.(); } catch { /* best effort */ }
           }
         });
       }

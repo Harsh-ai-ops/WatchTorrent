@@ -295,6 +295,33 @@ app.get('/api/health', (req, res) => {
   res.json({ status: 'ok', rooms: roomManager.getRoomCount() });
 });
 
+// ICE servers for the WebRTC video calls. STUN alone only works on permissive
+// NATs; a TURN relay is needed for restrictive/mobile networks. Set TURN_URL
+// (comma-separated), TURN_USERNAME and TURN_CREDENTIAL env vars to plug in your
+// own (Twilio / Metered / self-hosted coturn) — that's the reliable path.
+app.get('/api/ice', (req, res) => {
+  const iceServers = [
+    { urls: 'stun:stun.l.google.com:19302' },
+    { urls: 'stun:stun1.l.google.com:19302' },
+    { urls: 'stun:stun.cloudflare.com:3478' },
+  ];
+  if (process.env.TURN_URL) {
+    iceServers.push({
+      urls: process.env.TURN_URL.split(',').map((u) => u.trim()).filter(Boolean),
+      username: process.env.TURN_USERNAME || '',
+      credential: process.env.TURN_CREDENTIAL || '',
+    });
+  } else {
+    // Best-effort free public TURN (often rate-limited / may be unavailable).
+    iceServers.push(
+      { urls: 'turn:openrelay.metered.ca:80', username: 'openrelayproject', credential: 'openrelayproject' },
+      { urls: 'turn:openrelay.metered.ca:443', username: 'openrelayproject', credential: 'openrelayproject' },
+      { urls: 'turn:openrelay.metered.ca:443?transport=tcp', username: 'openrelayproject', credential: 'openrelayproject' },
+    );
+  }
+  res.json({ iceServers });
+});
+
 app.get('/subtitle/:infoHash/:fileIndex', (req, res) => {
   const { infoHash, fileIndex } = req.params;
   const peers = torrentEngine.getPeerCount(infoHash);
