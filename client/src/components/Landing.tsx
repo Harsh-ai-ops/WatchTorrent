@@ -41,13 +41,13 @@ export default function Landing({ onEnter }: LandingProps) {
 
   if (mode === 'home') {
     return (
-      <div className="h-screen flex items-center justify-center bg-zinc-950">
+      <div className="min-h-[100dvh] flex items-center justify-center bg-zinc-950 py-8">
         <div className="text-center space-y-8 animate-fade-in max-w-md px-6">
           <div className="space-y-2">
-            <h1 className="text-5xl font-bold bg-gradient-to-r from-purple-400 to-pink-400 bg-clip-text text-transparent">
+            <h1 className="text-4xl sm:text-5xl font-bold bg-gradient-to-r from-purple-400 to-pink-400 bg-clip-text text-transparent">
               WatchTorrent
             </h1>
-            <p className="text-zinc-400 text-lg">Watch torrents together. In perfect sync.</p>
+            <p className="text-zinc-400 text-base sm:text-lg">Watch torrents together. In perfect sync.</p>
           </div>
 
           <div className="space-y-3">
@@ -76,7 +76,7 @@ export default function Landing({ onEnter }: LandingProps) {
   }
 
   return (
-    <div className="h-screen flex items-center justify-center bg-zinc-950">
+    <div className="min-h-[100dvh] flex items-center justify-center bg-zinc-950 py-8">
       <div className="w-full max-w-sm mx-auto px-6 space-y-6 animate-fade-in">
         <button
           onClick={() => { setMode('home'); setError(''); }}

@@ -3,7 +3,6 @@ import { getSocket, disconnectSocket } from '../lib/socket.ts';
 import VideoPlayer from './VideoPlayer.tsx';
 import Chat from './Chat.tsx';
 import VideoCall from './VideoCall.tsx';
-import FileSelector from './FileSelector.tsx';
 import MagnetInput from './MagnetInput.tsx';
 import { FiUsers, FiMessageSquare, FiVideo, FiLogOut, FiMonitor, FiFileText, FiMusic, FiFilm } from 'react-icons/fi';
 import { formatBytes } from '../lib/utils.ts';
@@ -87,11 +86,19 @@ export default function Room({ roomId, userName, onLeave }: RoomProps) {
       setTorrentProgress({ peers: data.peers, progress: data.progress, speed: data.speed });
     };
 
+    // Socket.IO assigns a fresh id after a reconnect, so the server no longer
+    // knows we're in the room. Re-join on every (re)connect to restore our
+    // membership, chat history, and torrent/sync state.
+    const onReconnect = () => {
+      socket.emit('join-room', { roomId, name: userName }, () => {});
+    };
+
     socket.on('user-joined', onUserJoined);
     socket.on('user-left', onUserLeft);
     socket.on('torrent-ready', onTorrentReady);
     socket.on('file-selected', onFileSelected);
     socket.on('torrent-progress', onProgress);
+    socket.on('connect', onReconnect);
 
     return () => {
       socket.off('user-joined', onUserJoined);
@@ -99,8 +106,9 @@ export default function Room({ roomId, userName, onLeave }: RoomProps) {
       socket.off('torrent-ready', onTorrentReady);
       socket.off('file-selected', onFileSelected);
       socket.off('torrent-progress', onProgress);
+      socket.off('connect', onReconnect);
     };
-  }, [roomId, requestStreamUrl]);
+  }, [roomId, userName, requestStreamUrl]);
 
   const handleStartTorrent = useCallback((uri: string) => {
     setTorrentLoading(true);
@@ -131,7 +139,6 @@ export default function Room({ roomId, userName, onLeave }: RoomProps) {
     onLeave();
   }, [onLeave]);
 
-  const videoFiles = files.filter((f) => f.type === 'video');
   const showCall = activePanel === 'call';
 
   useEffect(() => {
@@ -141,8 +148,8 @@ export default function Room({ roomId, userName, onLeave }: RoomProps) {
   }, [torrentInfoHash, selectedFile, streamUrl, retryStreamUrl]);
 
   return (
-    <div className="h-screen flex flex-col bg-zinc-950">
-      <header className="flex items-center justify-between px-4 py-2 bg-zinc-900/80 backdrop-blur border-b border-zinc-800 shrink-0">
+    <div className="h-[100dvh] overflow-hidden flex flex-col bg-zinc-950">
+      <header className="relative z-30 flex items-center justify-between px-3 sm:px-4 py-2 bg-zinc-900/80 backdrop-blur border-b border-zinc-800 shrink-0">
         <div className="flex items-center gap-3 min-w-0">
           <span className="text-purple-400 font-bold shrink-0">WT</span>
           <span className="text-zinc-300 text-sm truncate">
@@ -241,15 +248,6 @@ export default function Room({ roomId, userName, onLeave }: RoomProps) {
                     </div>
                   </div>
                 )}
-
-                {videoFiles.length > 1 && (
-                  <FileSelector
-                    files={files}
-                    selectedIndex={selectedFile?.index ?? -1}
-                    onSelect={handleSelectFile}
-                    compact
-                  />
-                )}
               </div>
             </div>
           ) : (
@@ -282,8 +280,8 @@ export default function Room({ roomId, userName, onLeave }: RoomProps) {
 
         {sidebarOpen && activePanel && (
           <>
-            <div className="fixed inset-0 bg-black/50 z-10 md:hidden" onClick={() => setActivePanel(null)} />
-            <aside className="w-80 bg-zinc-900 border-l border-zinc-800 flex flex-col shrink-0 max-md:fixed max-md:right-0 max-md:top-12 max-md:bottom-0 max-md:w-80 max-md:z-20 max-md:shadow-2xl max-md:animate-slide-in">
+            <div className="fixed inset-0 top-[49px] bg-black/50 z-10 md:hidden" onClick={() => setActivePanel(null)} />
+            <aside className="w-80 bg-zinc-900 border-l border-zinc-800 flex flex-col shrink-0 max-md:fixed max-md:right-0 max-md:top-[49px] max-md:bottom-0 max-md:w-[85vw] max-md:max-w-[20rem] max-md:z-20 max-md:shadow-2xl max-md:animate-slide-in">
               <div className="flex items-center justify-between p-3 border-b border-zinc-800">
                 <span className="text-sm font-medium text-zinc-300">
                   {activePanel === 'chat' && 'Chat'}

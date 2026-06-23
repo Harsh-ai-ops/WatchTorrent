@@ -7,6 +7,7 @@ export default defineConfig({
   server: {
     proxy: {
       '/socket.io': { target: 'http://localhost:3000', ws: true },
+      '/peerjs': { target: 'http://localhost:3000', ws: true },
       '/stream': 'http://localhost:3000',
       '/subtitle': 'http://localhost:3000',
       '/api': 'http://localhost:3000',

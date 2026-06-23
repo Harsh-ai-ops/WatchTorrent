@@ -4,6 +4,8 @@ import { Server as SocketServer } from 'socket.io';
 import cors from 'cors';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { ExpressPeerServer } from 'peer';
+import { WebSocketServer } from 'ws';
 import { RoomManager } from './room-manager.js';
 import { TorrentEngine } from './torrent-engine.js';
 import { ChatService } from './chat-service.js';
@@ -39,9 +41,51 @@ const io = new SocketServer(server, {
 app.use(cors());
 app.use(express.json());
 
+// Self-hosted PeerJS signaling server, mounted on the same HTTP server so it
+// works behind a single port (Hugging Face Spaces / Render). The client points
+// at `/peerjs` on the current origin — no reliance on the flaky public broker.
+//
+// IMPORTANT: a default Peer WS server attaches to the raw HTTP server and aborts
+// EVERY upgrade that isn't its own — which would kill Socket.IO's websocket
+// transport. So we run Peer's WS server in `noServer` mode and dispatch upgrades
+// by path ourselves, leaving `/socket.io` upgrades for Socket.IO to handle.
+let peerWss = null;
+const peerServer = ExpressPeerServer(server, {
+  path: '/',
+  proxied: true,
+  allow_discovery: false,
+  createWebSocketServer: () => {
+    peerWss = new WebSocketServer({ noServer: true });
+    return peerWss;
+  },
+});
+peerServer.on('connection', (client) => console.log(`[peer] connect ${client.getId?.() ?? ''}`));
+peerServer.on('disconnect', (client) => console.log(`[peer] disconnect ${client.getId?.() ?? ''}`));
+app.use('/peerjs', peerServer);
+
+server.on('upgrade', (req, socket, head) => {
+  let pathname = '/';
+  try { pathname = new URL(req.url, 'http://localhost').pathname; } catch { /* keep default */ }
+  if (peerWss && pathname.startsWith('/peerjs')) {
+    peerWss.handleUpgrade(req, socket, head, (ws) => peerWss.emit('connection', ws, req));
+  }
+  // Any other path (notably /socket.io) is left for Socket.IO's own handler.
+});
+
 const roomManager = new RoomManager();
 const torrentEngine = new TorrentEngine();
 const chatService = new ChatService(io, roomManager);
+
+// Track the progress-broadcast interval per room so re-loading a torrent in the
+// same room never leaks timers.
+const roomProgressIntervals = new Map();
+function stopProgress(roomId) {
+  const t = roomProgressIntervals.get(roomId);
+  if (t) {
+    clearInterval(t);
+    roomProgressIntervals.delete(roomId);
+  }
+}
 
 io.on('connection', (socket) => {
   console.log(`[connect] ${socket.id}`);
@@ -98,13 +142,15 @@ io.on('connection', (socket) => {
 
       const torrent = torrentEngine.getTorrent(result.infoHash);
       if (torrent) {
+        // Clear any previous progress loop for this room before starting a new one.
+        stopProgress(roomId);
         if (torrent.done) {
           io.to(roomId).emit('torrent-progress', {
             downloaded: torrent.length, total: torrent.length, progress: 1, peers: 0, speed: 0,
           });
         } else {
           const interval = setInterval(() => {
-            if (!roomManager.roomExists(roomId)) { clearInterval(interval); return; }
+            if (!roomManager.roomExists(roomId)) { stopProgress(roomId); return; }
             io.to(roomId).emit('torrent-progress', {
               downloaded: torrent.downloaded,
               total: torrent.length,
@@ -112,9 +158,10 @@ io.on('connection', (socket) => {
               peers: torrent.numPeers,
               speed: torrent.downloadSpeed,
             });
-            if (torrent.done) { clearInterval(interval); }
+            if (torrent.done) { stopProgress(roomId); }
           }, 2000);
-          torrent.once('done', () => { clearInterval(interval); });
+          roomProgressIntervals.set(roomId, interval);
+          torrent.once('done', () => stopProgress(roomId));
         }
       }
 
@@ -190,6 +237,7 @@ io.on('connection', (socket) => {
         if (info) torrentEngine.removeTorrent(info.infoHash);
         chatService.clearRoom(roomId);
         roomManager.deleteRoom(roomId);
+        stopProgress(roomId);
         console.log(`[room] ${roomId} deleted - empty`);
       }
     });
@@ -220,7 +268,9 @@ app.get('/subtitle/:infoHash/:fileIndex', (req, res) => {
     stream.on('end', () => {
       let content = Buffer.concat(chunks).toString('utf-8');
       if (ext === 'srt') {
-        content = content.replace(/,/g, '.');
+        // Convert ONLY the comma inside SRT timecodes (00:00:00,000 -> 00:00:00.000).
+        // A blanket comma->dot replace would mangle every comma in the dialogue.
+        content = content.replace(/(\d{2}:\d{2}:\d{2}),(\d{3})/g, '$1.$2');
         content = 'WEBVTT\n\n' + content;
       }
       res.writeHead(200, { 'Content-Type': contentType });

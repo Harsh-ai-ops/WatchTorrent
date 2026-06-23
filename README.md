@@ -43,9 +43,9 @@ Open http://localhost:3000
 
 ## One-Click Deploy
 
-[![Deploy to Hugging Face](https://img.shields.io/badge/%F0%9F%A4%97-Deploy%20to%20Hugging%20Face-blue)](https://huggingface.co/new-space?template=YOUR_USERNAME/watchtorrent)
+[![Deploy to Hugging Face](https://img.shields.io/badge/%F0%9F%A4%97-Deploy%20to%20Hugging%20Face-blue)](https://huggingface.co/new-space?template=HarshGupta08/watchtorrent)
 
-[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/YOUR_USERNAME/watchtorrent)
+[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/Harsh-ai-ops/WatchTorrent)
 
 ## Tech Stack
 

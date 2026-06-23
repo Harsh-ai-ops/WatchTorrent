@@ -16,9 +16,17 @@
   scrollbar-color: #3f3f46 transparent;
 }
 
+html,
 body {
   margin: 0;
-  overflow: hidden;
+  height: 100%;
+}
+
+body {
+  /* Block only horizontal overflow. The Room view locks itself to 100dvh with
+     its own internal scroll regions; the Landing view scrolls normally so its
+     form is never clipped on short / landscape phones. */
+  overflow-x: hidden;
 }
 
 @keyframes fadeIn {

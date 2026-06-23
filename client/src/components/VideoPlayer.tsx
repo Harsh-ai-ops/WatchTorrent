@@ -223,8 +223,29 @@ export default function VideoPlayer({ streamUrl, roomId, userName, subtitleUrls:
   function showControls() {
     setShow(true);
     if (hideTimer.current) clearTimeout(hideTimer.current);
-    if (!paused) hideTimer.current = setTimeout(() => setShow(false), 3000);
+    // Read the live element state (not the React `paused` state, which lags a
+    // tick behind a just-issued play/pause) so the auto-hide timer is correct.
+    const v = el();
+    if (v && !v.paused) hideTimer.current = setTimeout(() => setShow(false), 3500);
   }
+
+  // Tap behavior that works on both touch and mouse: when controls are hidden a
+  // tap just reveals them; when already visible a tap toggles play/pause. On
+  // desktop the controls are usually visible (via mousemove), so a click pauses
+  // as expected.
+  function handleSurfaceClick() {
+    if (!show) { showControls(); return; }
+    playPause();
+    showControls();
+  }
+
+  // Keep controls visible whenever the video is paused.
+  useEffect(() => {
+    if (paused) {
+      setShow(true);
+      if (hideTimer.current) clearTimeout(hideTimer.current);
+    }
+  }, [paused]);
 
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
@@ -255,17 +276,33 @@ export default function VideoPlayer({ streamUrl, roomId, userName, subtitleUrls:
       ref={containerRef}
       className="relative flex-1 bg-black overflow-hidden"
       onMouseMove={showControls}
+      onTouchStart={showControls}
       onMouseLeave={() => !paused && setShow(false)}
     >
       <video
         ref={videoRef}
         src={streamUrl}
         className="w-full h-full object-contain cursor-pointer"
-        onClick={playPause}
+        onClick={handleSurfaceClick}
         playsInline
         crossOrigin="anonymous"
         preload="auto"
       />
+
+      {/* Large center play/pause target — easy to hit on touch screens. */}
+      {show && !stalled && (
+        <button
+          onClick={playPause}
+          aria-label={paused ? 'Play' : 'Pause'}
+          className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 z-10 flex items-center justify-center w-16 h-16 rounded-full bg-black/45 text-white backdrop-blur-sm transition-opacity hover:bg-black/60 cursor-pointer md:opacity-0 md:pointer-events-none"
+        >
+          {paused ? (
+            <svg className="w-8 h-8 ml-0.5" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z" /></svg>
+          ) : (
+            <svg className="w-8 h-8" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="4" width="4" height="16" /><rect x="14" y="4" width="4" height="16" /></svg>
+          )}
+        </button>
+      )}
 
       {stalled && (
         <div className="absolute inset-0 flex items-center justify-center bg-black/50 z-20">
@@ -316,7 +353,7 @@ export default function VideoPlayer({ streamUrl, roomId, userName, subtitleUrls:
           </div>
         )}
 
-        <div className="absolute bottom-0 left-0 right-0 px-4 pb-3 pt-16 pointer-events-auto">
+        <div className="absolute bottom-0 left-0 right-0 px-2 sm:px-4 pb-3 pt-16 pointer-events-auto">
           <div
             ref={progressRef}
             className="relative h-1 bg-zinc-700/60 rounded-full mb-3 cursor-pointer group/progress hover:h-1.5 transition-all"
@@ -366,7 +403,7 @@ export default function VideoPlayer({ streamUrl, roomId, userName, subtitleUrls:
                   <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polygon points="11,5 6,9 2,9 2,15 6,15 11,19 11,5"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14M15.54 8.46a5 5 0 0 1 0 7.07"/></svg>
                 )}
               </button>
-              <input type="range" min="0" max="1" step="0.05" value={muted ? 0 : vol} onChange={onVolume} className="w-14 h-1 accent-purple-500 cursor-pointer" />
+              <input type="range" min="0" max="1" step="0.05" value={muted ? 0 : vol} onChange={onVolume} className="hidden sm:block w-14 h-1 accent-purple-500 cursor-pointer" />
 
               <span className="text-xs text-zinc-400 tabular-nums ml-1 cursor-pointer hover:text-zinc-200" onClick={() => setShowRemaining(!showRemaining)}>
                 {showRemaining ? `-${formatTime(Math.max(0, durSec - time))}` : `${formatTime(time)} / ${formatTime(durSec)}`}

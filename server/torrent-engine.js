@@ -23,6 +23,9 @@ const DHT_BOOTSTRAP = [
   'dht.libtorrent.org:25401',
 ];
 
+// How many torrents to keep in memory at once (LRU eviction beyond this).
+const MAX_TORRENTS = 5;
+
 export class TorrentEngine {
   constructor() {
     this.client = new WebTorrent({
@@ -38,15 +41,18 @@ export class TorrentEngine {
     this.pending = new Map();
   }
 
-  addTorrent(uri) {
-    const key = uri.trim().toLowerCase();
+  async addTorrent(uri) {
+    const original = uri.trim();
+    // Dedup key only — never feed a lowercased URI to WebTorrent (tracker paths
+    // and base32 info hashes can be case-sensitive).
+    const key = original.toLowerCase();
 
     if (this.pending.has(key)) {
       console.log(`[torrent] waiting for existing pending: ${key.slice(0, 40)}`);
       return this.pending.get(key);
     }
 
-    const infoHash = this._parseInfoHash(uri);
+    const infoHash = this._parseInfoHash(original);
     if (infoHash) {
       const existing = this.torrents.get(infoHash);
       if (existing) {
@@ -54,20 +60,21 @@ export class TorrentEngine {
         const files = existing.files.map((f, i) => ({
           index: i, name: f.name, length: f.length, type: this._getFileType(f.name),
         }));
-        return Promise.resolve({ infoHash: existing.infoHash, name: existing.name, files });
+        return { infoHash: existing.infoHash, name: existing.name, files };
       }
-      const clientTorrent = this.client.get(infoHash);
-      if (clientTorrent && clientTorrent.files) {
+      // WebTorrent v3: client.get() is async and returns a Promise — must await it.
+      const clientTorrent = await this.client.get(infoHash);
+      if (clientTorrent && clientTorrent.files && clientTorrent.files.length > 0) {
         console.log(`[torrent] found in WebTorrent client: ${infoHash}`);
         this.torrents.set(infoHash, clientTorrent);
         const files = clientTorrent.files.map((f, i) => ({
           index: i, name: f.name, length: f.length, type: this._getFileType(f.name),
         }));
-        return Promise.resolve({ infoHash: clientTorrent.infoHash, name: clientTorrent.name, files });
+        return { infoHash: clientTorrent.infoHash, name: clientTorrent.name, files };
       }
     }
 
-    if (this.torrents.size >= 3) {
+    if (this.torrents.size >= MAX_TORRENTS) {
       const oldest = this.torrents.keys().next().value;
       console.log(`[torrent] evicting oldest: ${oldest}`);
       this.removeTorrent(oldest);
@@ -80,7 +87,7 @@ export class TorrentEngine {
         this.pending.delete(key);
       };
 
-      const enhancedUri = this._addTrackers(key);
+      const enhancedUri = this._addTrackers(original);
 
       const torrent = this.client.add(enhancedUri, { strategy: 'sequential' });
 
@@ -190,6 +197,9 @@ export class TorrentEngine {
   }
 
   _addTrackers(uri) {
+    // Only magnet links accept `&tr=` tracker params. Appending them to a plain
+    // .torrent HTTP(S) URL would corrupt the URL, so leave those untouched.
+    if (!uri.startsWith('magnet:')) return uri;
     let result = uri;
     for (const tracker of PUBLIC_TRACKERS) {
       if (!result.includes(encodeURIComponent(tracker)) && !result.includes(tracker)) {
