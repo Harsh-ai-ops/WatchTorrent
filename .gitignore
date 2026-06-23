@@ -5,3 +5,12 @@ dist/
 .DS_Store
 Thumbs.db
 *.tsbuildinfo
+
+# transient media (test artifacts — this app streams torrents, it doesn't store media)
+*.mkv
+*.mp4
+*.webm
+*.avi
+*.mov
+*.m4v
+_smoke*.mjs

@@ -6,9 +6,16 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { ExpressPeerServer } from 'peer';
 import { WebSocketServer } from 'ws';
+import { spawn } from 'child_process';
+import ffmpegPath from 'ffmpeg-static';
+import ffprobeStatic from 'ffprobe-static';
 import { RoomManager } from './room-manager.js';
 import { TorrentEngine } from './torrent-engine.js';
 import { ChatService } from './chat-service.js';
+
+const FFMPEG = ffmpegPath;
+const FFPROBE = ffprobeStatic.path;
+const PORT = process.env.PORT || 3000;
 
 process.on('uncaughtException', (err) => {
   const msg = err?.message || '';
@@ -373,12 +380,102 @@ app.get('/stream/:infoHash/:fileIndex', async (req, res) => {
   }
 });
 
+// ---- On-the-fly transcoding (so MKV/AVI/HEVC/AC3 etc. play in any browser) ----
+// ffmpeg reads the raw torrent file back through our own /stream endpoint (which
+// supports byte ranges, so seeking works), remuxes it into a browser-friendly
+// fragmented MP4, copies the video when it's already H.264 (cheap), transcodes
+// it otherwise, and always outputs AAC stereo audio.
+
+const probeCache = new Map(); // `${infoHash}:${idx}` -> { duration, video, audio }
+
+function probeMedia(srcUrl, cacheKey) {
+  if (probeCache.has(cacheKey)) return Promise.resolve(probeCache.get(cacheKey));
+  return new Promise((resolve) => {
+    const ff = spawn(FFPROBE, [
+      '-v', 'error',
+      '-show_entries', 'format=duration:stream=codec_type,codec_name',
+      '-of', 'json', srcUrl,
+    ]);
+    let out = '';
+    ff.stdout.on('data', (d) => { out += d; });
+    const killT = setTimeout(() => { try { ff.kill('SIGKILL'); } catch { /* ignore */ } }, 20000);
+    ff.on('error', () => { clearTimeout(killT); resolve({ duration: 0, video: '', audio: '' }); });
+    ff.on('close', () => {
+      clearTimeout(killT);
+      try {
+        const j = JSON.parse(out);
+        const v = (j.streams || []).find((s) => s.codec_type === 'video');
+        const a = (j.streams || []).find((s) => s.codec_type === 'audio');
+        const result = { duration: parseFloat(j.format?.duration) || 0, video: v?.codec_name || '', audio: a?.codec_name || '' };
+        if (result.video || result.duration) probeCache.set(cacheKey, result); // don't cache empty failures
+        resolve(result);
+      } catch {
+        resolve({ duration: 0, video: '', audio: '' });
+      }
+    });
+  });
+}
+
+app.get('/probe/:infoHash/:fileIndex', async (req, res) => {
+  const { infoHash, fileIndex } = req.params;
+  const idx = parseInt(fileIndex);
+  const file = torrentEngine.getFile(infoHash, idx);
+  if (!file) return res.status(404).json({ error: 'File not found' });
+  torrentEngine.selectFile(infoHash, idx);
+  try { await torrentEngine.waitForRange(infoHash, idx, 0, 12000); } catch { /* continue */ }
+  const info = await probeMedia(`http://127.0.0.1:${PORT}/stream/${infoHash}/${idx}`, `${infoHash}:${idx}`);
+  res.json(info);
+});
+
+app.get('/transcode/:infoHash/:fileIndex', async (req, res) => {
+  const { infoHash, fileIndex } = req.params;
+  const idx = parseInt(fileIndex);
+  const file = torrentEngine.getFile(infoHash, idx);
+  if (!file) return res.status(404).json({ error: 'File not found' });
+
+  const start = Math.max(0, parseFloat(req.query.start) || 0);
+  torrentEngine.selectFile(infoHash, idx);
+  try { await torrentEngine.waitForRange(infoHash, idx, 0, 12000); } catch { /* continue */ }
+
+  const srcUrl = `http://127.0.0.1:${PORT}/stream/${infoHash}/${idx}`;
+  const info = await probeMedia(srcUrl, `${infoHash}:${idx}`);
+  const copyVideo = ['h264', 'avc1'].includes(info.video);
+  const copyAudio = ['aac', 'mp3'].includes(info.audio);
+
+  const args = [
+    '-hide_banner', '-loglevel', 'error',
+    '-reconnect', '1', '-reconnect_streamed', '1', '-reconnect_delay_max', '5',
+    ...(start > 0 ? ['-ss', String(start)] : []),
+    '-i', srcUrl,
+    '-map', '0:v:0?', '-map', '0:a:0?',
+    '-c:v', copyVideo ? 'copy' : 'libx264',
+    ...(copyVideo ? [] : ['-preset', 'veryfast', '-crf', '23', '-pix_fmt', 'yuv420p', '-g', '48', '-sc_threshold', '0']),
+    '-c:a', copyAudio ? 'copy' : 'aac',
+    ...(copyAudio ? [] : ['-ac', '2', '-b:a', '160k']),
+    '-movflags', 'frag_keyframe+empty_moov+default_base_moof',
+    '-frag_duration', '1000000',
+    '-max_muxing_queue_size', '1024',
+    '-f', 'mp4', 'pipe:1',
+  ];
+
+  res.writeHead(200, { 'Content-Type': 'video/mp4', 'Cache-Control': 'no-store', 'Accept-Ranges': 'none' });
+  const ff = spawn(FFMPEG, args);
+  ff.stdout.pipe(res);
+  let errTail = '';
+  ff.stderr.on('data', (d) => { errTail = (errTail + d).slice(-400); });
+  const kill = () => { try { ff.kill('SIGKILL'); } catch { /* ignore */ } };
+  res.on('close', kill);
+  ff.on('error', () => { kill(); if (!res.headersSent) { try { res.status(500).end(); } catch { /* ignore */ } } else { try { res.end(); } catch { /* ignore */ } } });
+  ff.on('close', (code) => {
+    if (code && code !== 0 && code !== 255) console.error(`[transcode] ffmpeg exit ${code}: ${errTail.split('\n').filter(Boolean).pop() || ''}`);
+  });
+});
+
 app.use(express.static(path.join(__dirname, '../client/dist')));
 app.get('*', (req, res) => {
   res.sendFile(path.join(__dirname, '../client/dist/index.html'));
 });
 
-const PORT = process.env.PORT || 3000;
 server.listen(PORT, '0.0.0.0', () => {
   console.log(`WatchTorrent running on http://0.0.0.0:${PORT}`);
 });

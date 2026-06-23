@@ -10,9 +10,10 @@ interface VideoPlayerProps {
   subtitleUrls?: { label: string; url: string }[];
 }
 
-// Containers most browsers can't decode natively. We can't transcode on a free
-// host, so we warn instead of failing silently (the classic "audio plays, video
-// frozen" symptom is usually one of these or an HEVC/H.265 track in an .mp4).
+// Containers most browsers can't decode natively. These are routed through the
+// server-side transcoder (/transcode) instead of /stream so they actually play.
+// An HEVC/H.265 track inside an .mp4 isn't listed here but is caught at runtime
+// by the decode-error handler, which flips on transcoding too.
 const RISKY_EXTS = ['mkv', 'avi', 'wmv', 'flv', 'ts', 'm2ts', 'mpg', 'mpeg', 'vob', 'rmvb', '3gp'];
 
 interface SubtitleCue {
@@ -34,6 +35,13 @@ export default function VideoPlayer({ streamUrl, roomId, userName, fileName, sub
   const lastSync = useRef(0);
   const requestedSync = useRef(false);
   const autoRetries = useRef(0);
+  // Refs mirror render state so the imperative helpers (seek/sync/keyboard) read
+  // live values even when captured in long-lived closures.
+  const baseRef = useRef(0);
+  const totalDurRef = useRef(0);
+  const transcodeRef = useRef(false);
+  const resumePlayRef = useRef(false);
+  const resumeAtRef = useRef(0);
   const socket = getSocket();
 
   const [paused, setPaused] = useState(true);
@@ -56,22 +64,93 @@ export default function VideoPlayer({ streamUrl, roomId, userName, fileName, sub
   const [stalled, setStalled] = useState(false);
   const [loadError, setLoadError] = useState('');
   const [hintDismissed, setHintDismissed] = useState(false);
+  const [forceTranscode, setForceTranscode] = useState(false);
+  const [base, setBase] = useState(0);     // start offset (s) of the current transcoded segment
+  const [extDur, setExtDur] = useState(0); // total duration (s) from /probe (transcode only)
+  const [reloadKey, setReloadKey] = useState(0);
 
   const ext = fileName?.split('.').pop()?.toLowerCase() || '';
   const riskyContainer = RISKY_EXTS.includes(ext);
+  // Route browser-hostile containers/codecs through the server transcoder, which
+  // emits a fresh 0-based fragmented-MP4 segment per `?start=`. So absolute movie
+  // time = base + <video>.currentTime, and the total duration comes from /probe.
+  const transcode = riskyContainer || forceTranscode;
+  const transcodeUrl = streamUrl.replace('/stream/', '/transcode/');
+  const probeUrl = streamUrl.replace('/stream/', '/probe/');
 
   const el = () => videoRef.current;
-  const durSec = dur || 0;
-  const pct = durSec > 0 ? (time / durSec) * 100 : 0;
-  const bufPct = durSec > 0 ? (buffered / durSec) * 100 : 0;
+  const startOffset = transcode ? base : 0;
+  const totalDur = transcode ? (extDur || dur || 0) : (dur || 0);
+  const displayTime = startOffset + time;
+  const pct = totalDur > 0 ? (displayTime / totalDur) * 100 : 0;
+  const bufPct = totalDur > 0 ? ((startOffset + buffered) / totalDur) * 100 : 0;
+  const playSrc = transcode
+    ? `${transcodeUrl}?start=${base}&k=${reloadKey}`
+    : (reloadKey ? `${streamUrl}${streamUrl.includes('?') ? '&' : '?'}k=${reloadKey}` : streamUrl);
+
+  // Keep refs fresh for closures that outlive a render.
+  transcodeRef.current = transcode;
+  totalDurRef.current = totalDur;
+
+  // Absolute movie position right now (handles the transcode base offset).
+  function absNow() { return (transcodeRef.current ? baseRef.current : 0) + (el()?.currentTime || 0); }
+  function isBuffered(v: HTMLVideoElement, t: number) {
+    try { for (let i = 0; i < v.buffered.length; i++) { if (t >= v.buffered.start(i) - 0.5 && t <= v.buffered.end(i)) return true; } } catch { /* ignore */ }
+    return false;
+  }
+  // Restart the transcoded stream at a new absolute offset (used for far seeks
+  // and remote sync, since a transcoded segment isn't byte-range seekable).
+  function reloadSegment(newBase: number, keepPlaying: boolean) {
+    baseRef.current = newBase;
+    resumePlayRef.current = keepPlaying;
+    setBase(newBase);
+    setReloadKey((k) => k + 1);
+  }
+  // Move to an absolute position WITHOUT re-emitting sync (used when applying a
+  // remote sync event): native seek if reachable, else reload the segment.
+  function gotoAbs(pos: number, play: boolean) {
+    const v = el();
+    if (!v) return;
+    if (transcodeRef.current) {
+      const local = pos - baseRef.current;
+      if (local >= 0 && isBuffered(v, local)) v.currentTime = local;
+      else { reloadSegment(pos, play); return; }
+    } else {
+      try { v.currentTime = pos; } catch { /* ignore */ }
+    }
+    if (play) v.play().catch(() => {}); else v.pause();
+  }
+
+  useEffect(() => { baseRef.current = base; }, [base]);
+
+  // Reset segment/transcode state whenever a different file is selected.
+  useEffect(() => {
+    setForceTranscode(false);
+    setBase(0); baseRef.current = 0;
+    setReloadKey(0);
+    setExtDur(0);
+    requestedSync.current = false;
+  }, [streamUrl]);
+
+  // For transcoded files, fetch the real total duration (the per-segment
+  // <video>.duration only covers from the current offset onward).
+  useEffect(() => {
+    if (!transcode) return;
+    let cancelled = false;
+    fetch(probeUrl)
+      .then((r) => (r.ok ? r.json() : null))
+      .then((info) => { if (!cancelled && info && info.duration) setExtDur(info.duration); })
+      .catch(() => { /* fall back to <video>.duration */ });
+    return () => { cancelled = true; };
+  }, [transcode, probeUrl]);
 
   useEffect(() => {
     const v = el();
     if (!v) return;
     const vv = v!;
 
-    function onPlay() { setPaused(false); sync('sync-play', vv.currentTime); }
-    function onPause() { setPaused(true); sync('sync-pause', vv.currentTime); }
+    function onPlay() { setPaused(false); sync('sync-play', absNow()); }
+    function onPause() { setPaused(true); sync('sync-pause', absNow()); }
     function onTime() { setTime(vv.currentTime); }
     function onDur() { setDur(vv.duration || 0); }
     function onProg() {
@@ -83,6 +162,7 @@ export default function VideoPlayer({ streamUrl, roomId, userName, fileName, sub
       setStalled(false);
       setLoadError('');
       autoRetries.current = 0;
+      if (resumePlayRef.current) { resumePlayRef.current = false; vv.play().catch(() => {}); }
       // First time we can actually play, ask the room where playback is so a
       // new joiner snaps into sync with everyone else.
       if (!requestedSync.current) {
@@ -91,14 +171,24 @@ export default function VideoPlayer({ streamUrl, roomId, userName, fileName, sub
       }
     }
     function onLoadStart() { setStalled(true); }
+    function onLoadedMeta() {
+      // Restore position after a non-transcode reload (retry). Transcoded
+      // segments already start at their base offset, so no seek is needed.
+      if (!transcodeRef.current && resumeAtRef.current > 0.5) {
+        try { vv.currentTime = resumeAtRef.current; } catch { /* ignore */ }
+      }
+      resumeAtRef.current = 0;
+    }
     function onErr() {
-      // Distinguish "can't decode" (codec/container) from a transient network blip.
       const code = vv.error?.code;
       if (code === 4 /* MEDIA_ERR_SRC_NOT_SUPPORTED */ || code === 3 /* DECODE */) {
-        setStalled(false);
-        setLoadError(
-          "This video's format isn't supported by your browser — audio may still play while the picture stays frozen. MP4 (H.264 + AAC) plays most reliably."
-        );
+        if (!transcodeRef.current) {
+          // Browser can't decode the raw file — fall back to server transcoding.
+          setForceTranscode(true);
+        } else {
+          setStalled(false);
+          setLoadError("Couldn't play this video even after converting it. The file may be corrupt or use an unsupported codec.");
+        }
       }
     }
 
@@ -112,6 +202,7 @@ export default function VideoPlayer({ streamUrl, roomId, userName, fileName, sub
     vv.addEventListener('canplay', onCanPlay);
     vv.addEventListener('canplaythrough', onCanPlay);
     vv.addEventListener('loadstart', onLoadStart);
+    vv.addEventListener('loadedmetadata', onLoadedMeta);
     vv.addEventListener('error', onErr);
     return () => {
       vv.removeEventListener('play', onPlay);
@@ -124,6 +215,7 @@ export default function VideoPlayer({ streamUrl, roomId, userName, fileName, sub
       vv.removeEventListener('canplay', onCanPlay);
       vv.removeEventListener('canplaythrough', onCanPlay);
       vv.removeEventListener('loadstart', onLoadStart);
+      vv.removeEventListener('loadedmetadata', onLoadedMeta);
       vv.removeEventListener('error', onErr);
     };
   }, [socket, roomId]);
@@ -134,13 +226,16 @@ export default function VideoPlayer({ streamUrl, roomId, userName, fileName, sub
       const v = el();
       if (!v) return;
       lastSync.current = Date.now();
-      // Only hard-seek when we're meaningfully out of sync; tiny corrections
-      // would otherwise cause a visible stutter on every play/pause echo.
-      if ((type === 'seek' || type === 'play' || type === 'pause') && typeof data.position === 'number') {
-        if (Math.abs(v.currentTime - data.position) > 0.4) v.currentTime = data.position;
+      const pos = typeof data.position === 'number' ? data.position : null;
+      const wantPlay = type === 'play' ? true : type === 'pause' ? false : !v.paused;
+      // Reposition only when meaningfully out of sync (transcode-aware: far jumps
+      // reload the segment); tiny corrections would stutter on every echo.
+      if (pos !== null && Math.abs(absNow() - pos) > 0.6) {
+        gotoAbs(pos, wantPlay);
+      } else {
+        if (type === 'play') v.play().catch(() => {});
+        if (type === 'pause') v.pause();
       }
-      if (type === 'play') v.play().catch(() => {});
-      if (type === 'pause') v.pause();
     };
     // NOTE: handlers must be stable references so socket.off actually detaches
     // them on cleanup (the previous code passed a fresh fn() each time and
@@ -159,11 +254,9 @@ export default function VideoPlayer({ streamUrl, roomId, userName, fileName, sub
       socket.emit('provide-sync', { roomId, requesterId: data.requesterId, position: v.currentTime, paused: v.paused });
     };
     const onApplySync = (data: any) => {
-      const v = el();
-      if (!v || typeof data?.position !== 'number') return;
+      if (!el() || typeof data?.position !== 'number') return;
       lastSync.current = Date.now();
-      try { v.currentTime = data.position; } catch { /* not seekable yet */ }
-      if (data.paused) v.pause(); else v.play().catch(() => {});
+      gotoAbs(data.position, !data.paused);
     };
 
     socket.on('sync-play', onPlay);
@@ -194,19 +287,18 @@ export default function VideoPlayer({ streamUrl, roomId, userName, fileName, sub
   const retryStream = useCallback(() => {
     const v = videoRef.current;
     if (!v) return;
-    const resumeAt = v.currentTime || 0;
     setStalled(false);
     setLoadError('');
-    const base = streamUrl.split('?')[0];
-    v.src = `${base}?_=${Date.now()}`;
-    v.load();
-    const onMeta = () => {
-      v.removeEventListener('loadedmetadata', onMeta);
-      try { if (resumeAt > 0.5) v.currentTime = resumeAt; } catch { /* ignore */ }
-      v.play().catch(() => {});
-    };
-    v.addEventListener('loadedmetadata', onMeta);
-  }, [streamUrl]);
+    if (transcodeRef.current) {
+      // Restart the transcode at our current absolute position.
+      reloadSegment(Math.floor(baseRef.current + (v.currentTime || 0)), !v.paused);
+    } else {
+      // Re-request the byte stream; position is restored on loadedmetadata.
+      resumePlayRef.current = !v.paused;
+      resumeAtRef.current = v.currentTime || 0;
+      setReloadKey((k) => k + 1);
+    }
+  }, []);
 
   // Auto-recover from a sustained stall a few times before leaving it to the user.
   useEffect(() => {
@@ -223,16 +315,23 @@ export default function VideoPlayer({ streamUrl, roomId, userName, fileName, sub
     if (v.paused) v.play().catch(() => {}); else v.pause();
   }
 
-  function seek(t: number) {
+  function seek(absTarget: number) {
     const v = el();
     if (!v) return;
-    const clamped = Math.max(0, Math.min(t, v.duration || 0));
-    v.currentTime = clamped;
-    setTime(clamped);
+    const total = totalDurRef.current;
+    const clamped = Math.max(0, total > 0 ? Math.min(absTarget, total) : absTarget);
+    if (transcodeRef.current) {
+      const local = clamped - baseRef.current;
+      if (local >= 0 && isBuffered(v, local)) { v.currentTime = local; setTime(local); }
+      else { reloadSegment(clamped, !v.paused); }   // far seek -> restart transcode there
+    } else {
+      v.currentTime = clamped;
+      setTime(clamped);
+    }
     socket.emit('sync-seek', { roomId, position: clamped });
   }
 
-  function skip(s: number) { const v = el(); if (v) seek((v.currentTime || 0) + s); }
+  function skip(s: number) { seek(absNow() + s); }
 
   function toggleMute() {
     const v = el();
@@ -273,7 +372,7 @@ export default function VideoPlayer({ streamUrl, roomId, userName, fileName, sub
     if (!bar || !v) return;
     const rect = bar.getBoundingClientRect();
     const x = (e.clientX - rect.left) / rect.width;
-    setHoverSec(x * (v.duration || 0));
+    setHoverSec(x * (totalDurRef.current || 0));
     setHoverPx(e.clientX - rect.left);
   }
 
@@ -285,7 +384,7 @@ export default function VideoPlayer({ streamUrl, roomId, userName, fileName, sub
     if (!bar || !v) return;
     const rect = bar.getBoundingClientRect();
     const x = (e.clientX - rect.left) / rect.width;
-    seek(x * (v.duration || 0));
+    seek(x * (totalDurRef.current || 0));
   }
 
   function onSubFile(e: React.ChangeEvent<HTMLInputElement>) {
@@ -358,14 +457,14 @@ export default function VideoPlayer({ streamUrl, roomId, userName, fileName, sub
         case '.': const v4 = el(); if (v4 && v4.paused) v4.currentTime = Math.min(v4.duration || 0, v4.currentTime + 1/30); break;
         case '0': seek(0); break;
         case '1': case '2': case '3': case '4': case '5':
-        case '6': case '7': case '8': case '9': const v5 = el(); if (v5?.duration) seek(v5.duration * (parseInt(e.key) / 10)); break;
+        case '6': case '7': case '8': case '9': { const total = totalDurRef.current; if (total) seek(total * (parseInt(e.key) / 10)); break; }
       }
     }
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   }, []);
 
-  const activeSub = subOn && subCues.find((c) => time >= c.start && time < c.end);
+  const activeSub = subOn && subCues.find((c) => displayTime >= c.start && displayTime < c.end);
 
   return (
     <div
@@ -377,7 +476,7 @@ export default function VideoPlayer({ streamUrl, roomId, userName, fileName, sub
     >
       <video
         ref={videoRef}
-        src={streamUrl}
+        src={playSrc}
         className="w-full h-full object-contain cursor-pointer"
         onClick={handleSurfaceClick}
         playsInline
@@ -400,11 +499,9 @@ export default function VideoPlayer({ streamUrl, roomId, userName, fileName, sub
         </button>
       )}
 
-      {(loadError || (riskyContainer && !hintDismissed)) && (
+      {loadError && (
         <div className="absolute top-3 left-1/2 -translate-x-1/2 z-40 max-w-[92%] sm:max-w-md flex items-start gap-2 bg-amber-950/90 border border-amber-700/60 rounded-lg px-3 py-2 text-amber-100 text-xs shadow-lg">
-          <span className="flex-1 leading-relaxed">
-            {loadError || `Heads up: ".${ext}" files often won't play in a browser — the picture may freeze while audio keeps going. MP4 (H.264 + AAC) is the most reliable format.`}
-          </span>
+          <span className="flex-1 leading-relaxed">{loadError}</span>
           <button
             onClick={() => { setHintDismissed(true); setLoadError(''); }}
             aria-label="Dismiss"
@@ -421,7 +518,9 @@ export default function VideoPlayer({ streamUrl, roomId, userName, fileName, sub
               <div className="w-2 h-2 bg-purple-400 rounded-full typing-dot" style={{animationDelay:'0.2s'}} />
               <div className="w-2 h-2 bg-purple-400 rounded-full typing-dot" style={{animationDelay:'0.4s'}} />
             </div>
-            <p className="text-zinc-300 text-sm">Waiting for data from peers...</p>
+            <p className="text-zinc-300 text-sm">
+              {transcode ? `Converting ${ext ? '.' + ext : 'video'} for your browser…` : 'Waiting for data from peers...'}
+            </p>
             <button
               onClick={retryStream}
               className="px-3 py-1.5 text-xs bg-purple-600 hover:bg-purple-500 rounded-lg transition-colors cursor-pointer"
@@ -464,7 +563,7 @@ export default function VideoPlayer({ streamUrl, roomId, userName, fileName, sub
             <div className="absolute h-full bg-purple-500 rounded-full" style={{ width: `${pct}%` }} />
             <div className="absolute top-1/2 -translate-y-1/2 w-3.5 h-3.5 bg-purple-400 rounded-full opacity-0 group-hover/progress:opacity-100 transition-all shadow" style={{ left: `calc(${pct}% - 7px)` }} />
             {hoverSec !== null && (
-              <div className="absolute top-1/2 -translate-y-1/2 w-2 h-2 bg-white rounded-full shadow" style={{ left: `calc(${(hoverSec / (durSec || 1)) * 100}% - 4px)` }} />
+              <div className="absolute top-1/2 -translate-y-1/2 w-2 h-2 bg-white rounded-full shadow" style={{ left: `calc(${(hoverSec / (totalDur || 1)) * 100}% - 4px)` }} />
             )}
           </div>
 
@@ -505,7 +604,7 @@ export default function VideoPlayer({ streamUrl, roomId, userName, fileName, sub
               <input type="range" min="0" max="1" step="0.05" value={muted ? 0 : vol} onChange={onVolume} className="hidden sm:block w-14 h-1 accent-purple-500 cursor-pointer" />
 
               <span className="text-xs text-zinc-400 tabular-nums ml-1 cursor-pointer hover:text-zinc-200" onClick={() => setShowRemaining(!showRemaining)}>
-                {showRemaining ? `-${formatTime(Math.max(0, durSec - time))}` : `${formatTime(time)} / ${formatTime(durSec)}`}
+                {showRemaining ? `-${formatTime(Math.max(0, totalDur - displayTime))}` : `${formatTime(displayTime)} / ${formatTime(totalDur)}`}
               </span>
             </div>
 
