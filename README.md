@@ -14,10 +14,11 @@ Watch torrents together with friends in perfect sync. Paste a magnet link, creat
 
 ## Features
 
-- **Torrent Streaming** - Paste magnet links or .torrent URLs, instant WebTorrent streaming
+- **Torrent Streaming** - Paste magnet links or .torrent URLs, server-side WebTorrent streaming
+- **Plays anything** - MKV / AVI / HEVC / AC3 are transcoded to browser-friendly MP4 on the fly (ffmpeg)
 - **Sync Playback** - Play, pause, seek - everything synced for all room members
 - **Real-time Chat** - Built-in chat with message history
-- **Video/Audio Calls** - P2P WebRTC calls via PeerJS
+- **Video/Audio Calls** - Native WebRTC mesh, signaled over Socket.IO (no third-party broker)
 - **Multi-file Support** - Pick which file to stream from multi-file torrents
 - **No Sign-up** - Just create a room and share the 6-char code
 - **Cinema UI** - Dark, minimal design focused on the video
@@ -41,11 +42,37 @@ node server/index.js
 
 Open http://localhost:3000
 
-## One-Click Deploy
+## Deployment & networking (READ THIS)
 
-[![Deploy to Hugging Face](https://img.shields.io/badge/%F0%9F%A4%97-Deploy%20to%20Hugging%20Face-blue)](https://huggingface.co/new-space?template=HarshGupta08/watchtorrent)
+This app **downloads torrents on the server**, which needs real BitTorrent
+connectivity — outbound TCP, ideally UDP (DHT), and decent bandwidth. Managed
+"free tier" hosts that block UDP / inbound connections (**Hugging Face Spaces,
+Render, Railway**) will make torrents **stall on "Connecting to peers"** even
+when the magnet is fine. The buffering overlay shows live `peers · MB/s · MB`
+so you can tell whether data is actually flowing.
 
-[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/Harsh-ai-ops/WatchTorrent)
+**Where it actually works well:**
+
+| Host | Torrents | Notes |
+|------|----------|-------|
+| **Your own machine / home server** | ✅ best | `node server/index.js`, full networking |
+| **Oracle Cloud "Always Free" VM** | ✅ | Real always-free VM (ARM, 4 vCPU/24GB), full networking |
+| **Fly.io** | ✅ mostly | Free allowance, allows UDP + inbound |
+| **A small VPS** (Hetzner/DigitalOcean) | ✅ | A few $/mo, no limits |
+| Hugging Face / Render / Railway | ⚠️ webseed-only | Great for the demo; poor for real torrents |
+
+### Video calls — TURN for restrictive networks
+
+Calls use native WebRTC. STUN (built in) is enough on the same network or
+typical home routers. For users behind strict/mobile NATs you need a **TURN
+relay** — set these env vars (free creds from [metered.ca](https://www.metered.ca/)
+or Twilio) and calls work everywhere, no code change:
+
+```
+TURN_URL=turn:your.turn.host:3478,turns:your.turn.host:5349
+TURN_USERNAME=your-username
+TURN_CREDENTIAL=your-credential
+```
 
 ## Tech Stack
 
@@ -53,6 +80,7 @@ Open http://localhost:3000
 |-------|------|
 | Frontend | React 19, Vite, TypeScript, Tailwind CSS 4 |
 | Backend | Node.js, Express, Socket.IO |
-| Torrent Engine | WebTorrent (server-side, TCP/uTP + WebRTC) |
-| Video/Audio Calls | PeerJS (WebRTC mesh) |
-| Deployment | Docker, Hugging Face Spaces, Render |
+| Torrent Engine | WebTorrent (server-side, TCP) |
+| Transcoding | ffmpeg (ffmpeg-static, on-the-fly fragmented MP4) |
+| Video/Audio Calls | Native WebRTC mesh, Socket.IO signaling |
+| Deployment | Docker, any Node host (best with full networking) |

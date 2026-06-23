@@ -4,8 +4,6 @@ import { Server as SocketServer } from 'socket.io';
 import cors from 'cors';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { ExpressPeerServer } from 'peer';
-import { WebSocketServer } from 'ws';
 import { spawn } from 'child_process';
 import fs from 'fs';
 import { RoomManager } from './room-manager.js';
@@ -52,37 +50,6 @@ const io = new SocketServer(server, {
 
 app.use(cors());
 app.use(express.json());
-
-// Self-hosted PeerJS signaling server, mounted on the same HTTP server so it
-// works behind a single port (Hugging Face Spaces / Render). The client points
-// at `/peerjs` on the current origin — no reliance on the flaky public broker.
-//
-// IMPORTANT: a default Peer WS server attaches to the raw HTTP server and aborts
-// EVERY upgrade that isn't its own — which would kill Socket.IO's websocket
-// transport. So we run Peer's WS server in `noServer` mode and dispatch upgrades
-// by path ourselves, leaving `/socket.io` upgrades for Socket.IO to handle.
-let peerWss = null;
-const peerServer = ExpressPeerServer(server, {
-  path: '/',
-  proxied: true,
-  allow_discovery: false,
-  createWebSocketServer: () => {
-    peerWss = new WebSocketServer({ noServer: true });
-    return peerWss;
-  },
-});
-peerServer.on('connection', (client) => console.log(`[peer] connect ${client.getId?.() ?? ''}`));
-peerServer.on('disconnect', (client) => console.log(`[peer] disconnect ${client.getId?.() ?? ''}`));
-app.use('/peerjs', peerServer);
-
-server.on('upgrade', (req, socket, head) => {
-  let pathname = '/';
-  try { pathname = new URL(req.url, 'http://localhost').pathname; } catch { /* keep default */ }
-  if (peerWss && pathname.startsWith('/peerjs')) {
-    peerWss.handleUpgrade(req, socket, head, (ws) => peerWss.emit('connection', ws, req));
-  }
-  // Any other path (notably /socket.io) is left for Socket.IO's own handler.
-});
 
 const roomManager = new RoomManager();
 const torrentEngine = new TorrentEngine();
@@ -266,10 +233,14 @@ io.on('connection', (socket) => {
     io.to(roomId).emit('subtitle', { subtitles });
   });
 
+  // WebRTC signaling relay for video calls. `to` = directed (offer/answer/ice to
+  // one peer); otherwise broadcast to the room (call-join). `from` is stamped
+  // server-side so it's trustworthy.
   socket.on('signal', (data) => {
-    const { roomId } = data || {};
-    if (!roomId) return;
-    socket.to(roomId).emit('signal', data);
+    if (!data) return;
+    const payload = { ...data, from: socket.id };
+    if (data.to) { io.to(data.to).emit('signal', payload); return; }
+    if (data.roomId) socket.to(data.roomId).emit('signal', payload);
   });
 
   socket.on('disconnect', () => {
@@ -454,7 +425,7 @@ app.get('/probe/:infoHash/:fileIndex', async (req, res) => {
   const file = torrentEngine.getFile(infoHash, idx);
   if (!file) return res.status(404).json({ error: 'File not found' });
   torrentEngine.selectFile(infoHash, idx);
-  try { await torrentEngine.waitForRange(infoHash, idx, 0, 12000); } catch { /* continue */ }
+  try { await torrentEngine.waitForRange(infoHash, idx, 0, 8000); } catch { /* continue */ }
   const info = await probeMedia(`http://127.0.0.1:${PORT}/stream/${infoHash}/${idx}`, `${infoHash}:${idx}`);
   res.json(info);
 });
@@ -467,7 +438,7 @@ app.get('/transcode/:infoHash/:fileIndex', async (req, res) => {
 
   const start = Math.max(0, parseFloat(req.query.start) || 0);
   torrentEngine.selectFile(infoHash, idx);
-  try { await torrentEngine.waitForRange(infoHash, idx, 0, 12000); } catch { /* continue */ }
+  try { await torrentEngine.waitForRange(infoHash, idx, 0, 8000); } catch { /* continue */ }
 
   const srcUrl = `http://127.0.0.1:${PORT}/stream/${infoHash}/${idx}`;
   const info = await probeMedia(srcUrl, `${infoHash}:${idx}`);
@@ -481,11 +452,16 @@ app.get('/transcode/:infoHash/:fileIndex', async (req, res) => {
     '-i', srcUrl,
     '-map', '0:v:0?', '-map', '0:a:0?',
     '-c:v', copyVideo ? 'copy' : 'libx264',
-    ...(copyVideo ? [] : ['-preset', 'veryfast', '-crf', '23', '-pix_fmt', 'yuv420p', '-g', '48', '-sc_threshold', '0']),
+    ...(copyVideo ? [] : [
+      '-preset', 'ultrafast', '-tune', 'zerolatency', '-crf', '26', '-pix_fmt', 'yuv420p',
+      '-g', '48', '-sc_threshold', '0',
+      // Cap at 720p so re-encoding (e.g. HEVC) stays feasible on weak CPUs.
+      '-vf', "scale='min(1280,iw)':-2",
+    ]),
     '-c:a', copyAudio ? 'copy' : 'aac',
     ...(copyAudio ? [] : ['-ac', '2', '-b:a', '160k']),
     '-movflags', 'frag_keyframe+empty_moov+default_base_moof',
-    '-frag_duration', '1000000',
+    '-frag_duration', '500000',
     '-max_muxing_queue_size', '1024',
     '-f', 'mp4', 'pipe:1',
   ];
