@@ -5,10 +5,14 @@ const PUBLIC_TRACKERS = [
   'udp://tracker.openbittorrent.com:6969/announce',
   'udp://open.demonii.com:1337/announce',
   'udp://exodus.desync.com:6969/announce',
+  'udp://tracker.torrent.eu.org:451/announce',
+  'udp://open.stealth.si:80/announce',
+  'udp://tracker.tiny-vps.com:6969/announce',
+  'udp://explodie.org:6969/announce',
+  'udp://tracker.dler.org:6969/announce',
   'wss://tracker.openwebtorrent.com:443/announce',
   'wss://tracker.btorrent.xyz:443/announce',
   'wss://tracker.files.fm:7073/announce/s',
-  'wss://spacetradersapi.duckdns.org:443/announce',
   'http://tracker.opentrackr.org:1337/announce',
   'http://tracker.openbittorrent.com:6969/announce',
   'http://tracker.bittorrent.am:80/announce',
@@ -52,27 +56,18 @@ export class TorrentEngine {
       return this.pending.get(key);
     }
 
-    const infoHash = this._parseInfoHash(original);
-    if (infoHash) {
-      const existing = this.torrents.get(infoHash);
-      if (existing) {
-        console.log(`[torrent] reusing existing: ${infoHash}`);
-        const files = existing.files.map((f, i) => ({
-          index: i, name: f.name, length: f.length, type: this._getFileType(f.name),
-        }));
-        return { infoHash: existing.infoHash, name: existing.name, files };
+    // Robust dedup: ask WebTorrent directly. client.get() accepts a magnet,
+    // info hash (hex OR base32), or .torrent id, and is async in v3 — so this
+    // catches every "already added" case without hand-parsing the hash, which
+    // is what previously caused "Cannot add duplicate torrent" on reload.
+    try {
+      const existing = await this.client.get(original);
+      if (existing && existing.files && existing.files.length > 0) {
+        console.log(`[torrent] reusing existing: ${existing.infoHash}`);
+        this.torrents.set(existing.infoHash, existing);
+        return this._fileInfo(existing);
       }
-      // WebTorrent v3: client.get() is async and returns a Promise — must await it.
-      const clientTorrent = await this.client.get(infoHash);
-      if (clientTorrent && clientTorrent.files && clientTorrent.files.length > 0) {
-        console.log(`[torrent] found in WebTorrent client: ${infoHash}`);
-        this.torrents.set(infoHash, clientTorrent);
-        const files = clientTorrent.files.map((f, i) => ({
-          index: i, name: f.name, length: f.length, type: this._getFileType(f.name),
-        }));
-        return { infoHash: clientTorrent.infoHash, name: clientTorrent.name, files };
-      }
-    }
+    } catch { /* not present yet — fall through and add it */ }
 
     if (this.torrents.size >= MAX_TORRENTS) {
       const oldest = this.torrents.keys().next().value;
@@ -113,22 +108,31 @@ export class TorrentEngine {
           reject(new Error('Torrent has no files'));
           return;
         }
-        const files = torrent.files.map((f, i) => ({
-          index: i,
-          name: f.name,
-          length: f.length,
-          type: this._getFileType(f.name),
-        }));
-        console.log(`[torrent] READY: ${torrent.name} (${files.length} files, ${files.filter(f => f.type === 'video').length} video)`);
+        const info = this._fileInfo(torrent);
+        console.log(`[torrent] READY: ${torrent.name} (${info.files.length} files, ${info.files.filter(f => f.type === 'video').length} video)`);
         this.torrents.set(torrent.infoHash, torrent);
         cleanup();
-        resolve({ infoHash: torrent.infoHash, name: torrent.name, files });
+        resolve(info);
       });
 
-      torrent.on('error', (err) => {
+      torrent.on('error', async (err) => {
         clearTimeout(timeout);
-        console.error(`[torrent] error:`, err.message);
         cleanup();
+        const msg = err?.message || '';
+        // "Cannot add duplicate torrent <hash>" — it already exists in the
+        // client (e.g. a reload re-adding before the old one finished tearing
+        // down). Reuse the existing one instead of surfacing an error.
+        if (msg.toLowerCase().includes('duplicate')) {
+          try {
+            const existing = await this.client.get(original);
+            if (existing && existing.files && existing.files.length > 0) {
+              this.torrents.set(existing.infoHash, existing);
+              resolve(this._fileInfo(existing));
+              return;
+            }
+          } catch { /* fall through to reject */ }
+        }
+        console.error('[torrent] error:', msg);
         reject(err);
       });
 
@@ -172,18 +176,54 @@ export class TorrentEngine {
     return torrent ? torrent.numPeers : 0;
   }
 
-  waitForData(infoHash, offset, timeoutMs) {
-    return new Promise((resolve, reject) => {
+  // Focus download bandwidth on the file being streamed. Other large video
+  // files are deselected so throughput isn't wasted on them; small files
+  // (subtitles) stay selected so they're ready when requested.
+  selectFile(infoHash, fileIndex) {
+    const torrent = this.torrents.get(infoHash);
+    if (!torrent || !torrent.files) return;
+    torrent.files.forEach((f, i) => {
+      try {
+        if (i === fileIndex || f.length < 5 * 1024 * 1024) f.select();
+        else f.deselect();
+      } catch { /* ignore */ }
+    });
+  }
+
+  // Wait until the pieces backing `start` (plus a small read-ahead) actually
+  // exist before we start piping a range — checking the real bitfield for THIS
+  // file's offset, not a global byte count. Falls back to resolving after
+  // timeoutMs so a slow/seedless torrent still gets a response instead of hanging.
+  waitForRange(infoHash, fileIndex, start, timeoutMs) {
+    return new Promise((resolve) => {
       const torrent = this.torrents.get(infoHash);
-      if (!torrent) { resolve(); return; }
-      if (torrent.done || torrent.downloaded > offset + 5 * 1024 * 1024) { resolve(); return; }
-      const check = setInterval(() => {
-        if (torrent.done || torrent.downloaded > offset + 5 * 1024 * 1024) {
-          clearInterval(check);
-          resolve();
+      const file = torrent?.files?.[fileIndex];
+      if (!torrent || !file) return resolve();
+
+      const pieceLen = torrent.pieceLength || 256 * 1024;
+      const offset = (file.offset || 0) + Math.max(0, start);
+      const startPiece = Math.floor(offset / pieceLen);
+      const totalPieces = torrent.pieces?.length || startPiece + 6;
+      const lastPiece = Math.min(startPiece + 5, totalPieces - 1);
+
+      const ready = () => {
+        if (torrent.done) return true;
+        const bf = torrent.bitfield;
+        if (!bf || typeof bf.get !== 'function') return false;
+        for (let i = startPiece; i <= lastPiece; i++) {
+          if (!bf.get(i)) return false;
         }
-      }, 500);
-      setTimeout(() => { clearInterval(check); resolve(); }, timeoutMs);
+        return true;
+      };
+
+      // Ask WebTorrent to fetch this window first.
+      try { torrent.critical?.(startPiece, lastPiece); } catch { /* ignore */ }
+
+      if (ready()) return resolve();
+      const check = setInterval(() => {
+        if (ready()) { clearInterval(check); clearTimeout(to); resolve(); }
+      }, 250);
+      const to = setTimeout(() => { clearInterval(check); resolve(); }, timeoutMs);
     });
   }
 
@@ -207,6 +247,13 @@ export class TorrentEngine {
       }
     }
     return result;
+  }
+
+  _fileInfo(torrent) {
+    const files = (torrent.files || []).map((f, i) => ({
+      index: i, name: f.name, length: f.length, type: this._getFileType(f.name),
+    }));
+    return { infoHash: torrent.infoHash, name: torrent.name, files };
   }
 
   _getFileType(name) {

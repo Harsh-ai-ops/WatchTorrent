@@ -6,8 +6,14 @@ interface VideoPlayerProps {
   streamUrl: string;
   roomId: string;
   userName: string;
+  fileName?: string;
   subtitleUrls?: { label: string; url: string }[];
 }
+
+// Containers most browsers can't decode natively. We can't transcode on a free
+// host, so we warn instead of failing silently (the classic "audio plays, video
+// frozen" symptom is usually one of these or an HEVC/H.265 track in an .mp4).
+const RISKY_EXTS = ['mkv', 'avi', 'wmv', 'flv', 'ts', 'm2ts', 'mpg', 'mpeg', 'vob', 'rmvb', '3gp'];
 
 interface SubtitleCue {
   id: string;
@@ -20,12 +26,14 @@ const RATES = [0.25, 0.5, 0.75, 1, 1.25, 1.5, 2, 3];
 const SKIP = 10;
 const BIG_SKIP = 30;
 
-export default function VideoPlayer({ streamUrl, roomId, userName, subtitleUrls: _subUrls }: VideoPlayerProps) {
+export default function VideoPlayer({ streamUrl, roomId, userName, fileName, subtitleUrls: _subUrls }: VideoPlayerProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const progressRef = useRef<HTMLDivElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const hideTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastSync = useRef(0);
+  const requestedSync = useRef(false);
+  const autoRetries = useRef(0);
   const socket = getSocket();
 
   const [paused, setPaused] = useState(true);
@@ -46,6 +54,11 @@ export default function VideoPlayer({ streamUrl, roomId, userName, subtitleUrls:
   const [subOn, setSubOn] = useState(false);
   const [seeking, setSeeking] = useState(false);
   const [stalled, setStalled] = useState(false);
+  const [loadError, setLoadError] = useState('');
+  const [hintDismissed, setHintDismissed] = useState(false);
+
+  const ext = fileName?.split('.').pop()?.toLowerCase() || '';
+  const riskyContainer = RISKY_EXTS.includes(ext);
 
   const el = () => videoRef.current;
   const durSec = dur || 0;
@@ -66,8 +79,28 @@ export default function VideoPlayer({ streamUrl, roomId, userName, subtitleUrls:
     }
     function onRate() { setRate(vv.playbackRate); }
     function onWaiting() { setStalled(true); }
-    function onCanPlay() { setStalled(false); }
+    function onCanPlay() {
+      setStalled(false);
+      setLoadError('');
+      autoRetries.current = 0;
+      // First time we can actually play, ask the room where playback is so a
+      // new joiner snaps into sync with everyone else.
+      if (!requestedSync.current) {
+        requestedSync.current = true;
+        socket.emit('request-sync', { roomId });
+      }
+    }
     function onLoadStart() { setStalled(true); }
+    function onErr() {
+      // Distinguish "can't decode" (codec/container) from a transient network blip.
+      const code = vv.error?.code;
+      if (code === 4 /* MEDIA_ERR_SRC_NOT_SUPPORTED */ || code === 3 /* DECODE */) {
+        setStalled(false);
+        setLoadError(
+          "This video's format isn't supported by your browser — audio may still play while the picture stays frozen. MP4 (H.264 + AAC) plays most reliably."
+        );
+      }
+    }
 
     vv.addEventListener('play', onPlay);
     vv.addEventListener('pause', onPause);
@@ -79,6 +112,7 @@ export default function VideoPlayer({ streamUrl, roomId, userName, subtitleUrls:
     vv.addEventListener('canplay', onCanPlay);
     vv.addEventListener('canplaythrough', onCanPlay);
     vv.addEventListener('loadstart', onLoadStart);
+    vv.addEventListener('error', onErr);
     return () => {
       vv.removeEventListener('play', onPlay);
       vv.removeEventListener('pause', onPause);
@@ -90,28 +124,61 @@ export default function VideoPlayer({ streamUrl, roomId, userName, subtitleUrls:
       vv.removeEventListener('canplay', onCanPlay);
       vv.removeEventListener('canplaythrough', onCanPlay);
       vv.removeEventListener('loadstart', onLoadStart);
+      vv.removeEventListener('error', onErr);
     };
-  }, [socket]);
+  }, [socket, roomId]);
 
   useEffect(() => {
-    const fn = (type: string) => (data: any) => {
+    const apply = (type: string, data: any) => {
       if (data.by === socket.id) return;
       const v = el();
       if (!v) return;
       lastSync.current = Date.now();
-      if (type === 'seek' || type === 'play' || type === 'pause') v.currentTime = data.position;
+      // Only hard-seek when we're meaningfully out of sync; tiny corrections
+      // would otherwise cause a visible stutter on every play/pause echo.
+      if ((type === 'seek' || type === 'play' || type === 'pause') && typeof data.position === 'number') {
+        if (Math.abs(v.currentTime - data.position) > 0.4) v.currentTime = data.position;
+      }
       if (type === 'play') v.play().catch(() => {});
       if (type === 'pause') v.pause();
     };
-    socket.on('sync-play', fn('play'));
-    socket.on('sync-pause', fn('pause'));
-    socket.on('sync-seek', fn('seek'));
-    return () => {
-      socket.off('sync-play', fn('play'));
-      socket.off('sync-pause', fn('pause'));
-      socket.off('sync-seek', fn('seek'));
+    // NOTE: handlers must be stable references so socket.off actually detaches
+    // them on cleanup (the previous code passed a fresh fn() each time and
+    // leaked a listener on every remount).
+    const onPlay = (d: any) => apply('play', d);
+    const onPause = (d: any) => apply('pause', d);
+    const onSeek = (d: any) => apply('seek', d);
+
+    // Sync-on-join: answer a newcomer's request with our position (only if we
+    // actually have playback worth sharing), and apply a position handed back
+    // to us when we are the newcomer.
+    const onRequestSync = (data: any) => {
+      const v = el();
+      if (!v || !data?.requesterId) return;
+      if (v.readyState < 2 || (v.currentTime < 0.5 && v.paused)) return;
+      socket.emit('provide-sync', { roomId, requesterId: data.requesterId, position: v.currentTime, paused: v.paused });
     };
-  }, [socket]);
+    const onApplySync = (data: any) => {
+      const v = el();
+      if (!v || typeof data?.position !== 'number') return;
+      lastSync.current = Date.now();
+      try { v.currentTime = data.position; } catch { /* not seekable yet */ }
+      if (data.paused) v.pause(); else v.play().catch(() => {});
+    };
+
+    socket.on('sync-play', onPlay);
+    socket.on('sync-pause', onPause);
+    socket.on('sync-seek', onSeek);
+    socket.on('request-sync', onRequestSync);
+    socket.on('apply-sync', onApplySync);
+    return () => {
+      socket.off('sync-play', onPlay);
+      socket.off('sync-pause', onPause);
+      socket.off('sync-seek', onSeek);
+      socket.off('request-sync', onRequestSync);
+      socket.off('apply-sync', onApplySync);
+    };
+  }, [socket, roomId]);
 
   function sync(event: string, pos: number) {
     const now = Date.now();
@@ -120,6 +187,35 @@ export default function VideoPlayer({ streamUrl, roomId, userName, subtitleUrls:
       lastSync.current = now;
     }
   }
+
+  // Recover from a stall WITHOUT losing position: re-request the stream (the
+  // server supports byte ranges) and seek back to where we were. The old retry
+  // restarted at 0, which just re-stalled — hence "retry does nothing".
+  const retryStream = useCallback(() => {
+    const v = videoRef.current;
+    if (!v) return;
+    const resumeAt = v.currentTime || 0;
+    setStalled(false);
+    setLoadError('');
+    const base = streamUrl.split('?')[0];
+    v.src = `${base}?_=${Date.now()}`;
+    v.load();
+    const onMeta = () => {
+      v.removeEventListener('loadedmetadata', onMeta);
+      try { if (resumeAt > 0.5) v.currentTime = resumeAt; } catch { /* ignore */ }
+      v.play().catch(() => {});
+    };
+    v.addEventListener('loadedmetadata', onMeta);
+  }, [streamUrl]);
+
+  // Auto-recover from a sustained stall a few times before leaving it to the user.
+  useEffect(() => {
+    if (!stalled) return;
+    const t = setTimeout(() => {
+      if (autoRetries.current < 3) { autoRetries.current += 1; retryStream(); }
+    }, 12000);
+    return () => clearTimeout(t);
+  }, [stalled, retryStream]);
 
   function playPause() {
     const v = el();
@@ -304,6 +400,19 @@ export default function VideoPlayer({ streamUrl, roomId, userName, subtitleUrls:
         </button>
       )}
 
+      {(loadError || (riskyContainer && !hintDismissed)) && (
+        <div className="absolute top-3 left-1/2 -translate-x-1/2 z-40 max-w-[92%] sm:max-w-md flex items-start gap-2 bg-amber-950/90 border border-amber-700/60 rounded-lg px-3 py-2 text-amber-100 text-xs shadow-lg">
+          <span className="flex-1 leading-relaxed">
+            {loadError || `Heads up: ".${ext}" files often won't play in a browser — the picture may freeze while audio keeps going. MP4 (H.264 + AAC) is the most reliable format.`}
+          </span>
+          <button
+            onClick={() => { setHintDismissed(true); setLoadError(''); }}
+            aria-label="Dismiss"
+            className="shrink-0 text-amber-300 hover:text-white cursor-pointer leading-none text-sm"
+          >✕</button>
+        </div>
+      )}
+
       {stalled && (
         <div className="absolute inset-0 flex items-center justify-center bg-black/50 z-20">
           <div className="text-center space-y-3">
@@ -314,17 +423,7 @@ export default function VideoPlayer({ streamUrl, roomId, userName, subtitleUrls:
             </div>
             <p className="text-zinc-300 text-sm">Waiting for data from peers...</p>
             <button
-              onClick={() => {
-                const v = videoRef.current;
-                if (!v) return;
-                v.src = '';
-                v.load();
-                setTimeout(() => {
-                  v.src = streamUrl.split('?')[0] + '?_=' + Date.now();
-                  v.load();
-                  setStalled(false);
-                }, 100);
-              }}
+              onClick={retryStream}
               className="px-3 py-1.5 text-xs bg-purple-600 hover:bg-purple-500 rounded-lg transition-colors cursor-pointer"
             >
               Retry stream

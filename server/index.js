@@ -123,17 +123,34 @@ io.on('connection', (socket) => {
     }
   });
 
+  // Lets a freshly-mounted client pull the current room state on demand. The
+  // torrent-ready/file-selected events above can fire before the Room component
+  // has registered its listeners (join happens in the Landing view), so without
+  // this a new joiner would sit on the blank paste-magnet page.
+  socket.on('get-room-state', (data, callback) => {
+    const { roomId } = data || {};
+    callback?.({
+      users: roomManager.getRoomUsers(roomId),
+      torrent: roomManager.getTorrentInfo(roomId),
+    });
+  });
+
   socket.on('start-torrent', async (data, callback) => {
     const { roomId, uri } = data || {};
     if (!roomId || !uri) return callback?.({ error: 'Missing roomId or uri' });
     try {
       const result = await torrentEngine.addTorrent(uri);
+      // Default to the first VIDEO file, not files[0] — index 0 is often a
+      // subtitle/poster, which would hand a non-playable stream to anyone who
+      // adopts the default (e.g. a joiner pulling room state).
+      const defaultFile = result.files.find((f) => f.type === 'video') || result.files[0] || null;
       roomManager.setTorrentInfo(roomId, {
         infoHash: result.infoHash,
         name: result.name,
         files: result.files,
-        selectedFile: result.files[0] || null,
+        selectedFile: defaultFile,
       });
+      if (defaultFile) torrentEngine.selectFile(result.infoHash, defaultFile.index);
       io.to(roomId).emit('torrent-ready', {
         infoHash: result.infoHash,
         name: result.name,
@@ -178,6 +195,7 @@ io.on('connection', (socket) => {
     if (!info.files || !info.files[fileIndex]) return callback?.({ error: 'Invalid file index' });
     const file = info.files[fileIndex];
     roomManager.setSelectedFile(roomId, file);
+    torrentEngine.selectFile(info.infoHash, fileIndex);
     socket.to(roomId).emit('file-selected', { file });
     callback?.({ success: true, file });
   });
@@ -187,7 +205,9 @@ io.on('connection', (socket) => {
     const info = roomManager.getTorrentInfo(roomId);
     if (!info) return callback?.({ error: 'No torrent loaded' });
 
-    const streamUrl = torrentEngine.getStreamUrl(info.infoHash, info.selectedFile?.index || 0);
+    const fileIndex = info.selectedFile?.index || 0;
+    torrentEngine.selectFile(info.infoHash, fileIndex);
+    const streamUrl = torrentEngine.getStreamUrl(info.infoHash, fileIndex);
     if (streamUrl) callback?.({ url: streamUrl });
     else callback?.({ error: 'Stream not available' });
   });
@@ -210,6 +230,21 @@ io.on('connection', (socket) => {
   socket.on('sync-speed', (data) => {
     const { roomId, speed } = data || {};
     socket.to(roomId).emit('sync-speed', { speed, by: socket.id });
+  });
+
+  // A new joiner asks the room where playback currently is; existing members
+  // reply directly to the requester so the joiner jumps straight into sync
+  // instead of waiting for the next play/pause/seek.
+  socket.on('request-sync', (data) => {
+    const { roomId } = data || {};
+    if (!roomId) return;
+    socket.to(roomId).emit('request-sync', { requesterId: socket.id });
+  });
+
+  socket.on('provide-sync', (data) => {
+    const { requesterId, position, paused } = data || {};
+    if (!requesterId) return;
+    io.to(requesterId).emit('apply-sync', { position, paused });
   });
 
   socket.on('chat-message', (data) => chatService.handleMessage(socket, data));
@@ -296,8 +331,12 @@ app.get('/stream/:infoHash/:fileIndex', async (req, res) => {
   const end = range ? (range.split('-')[1] ? parseInt(range.split('-')[1], 10) : file.length - 1) : file.length - 1;
   const chunkSize = end - start + 1;
 
+  // Prioritise this file's bandwidth and wait for the requested byte window to
+  // actually exist before streaming, so playback resumes on real data instead
+  // of immediately re-stalling.
+  torrentEngine.selectFile(infoHash, parseInt(fileIndex));
   try {
-    await torrentEngine.waitForData(infoHash, start, 5000);
+    await torrentEngine.waitForRange(infoHash, parseInt(fileIndex), start, 8000);
   } catch {
     /* no data after timeout, continue anyway */
   }

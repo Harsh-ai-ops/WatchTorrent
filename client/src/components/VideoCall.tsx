@@ -15,12 +15,17 @@ interface CallPeer {
   name: string;
 }
 
-const STUN_SERVERS = [
+// STUN handles direct (peer-to-peer) connections; the free public TURN relays
+// (Open Relay) are the fallback for symmetric NATs and restrictive mobile
+// networks where STUN alone fails — that's the usual cause of "connected but no
+// video/audio". TURN traffic is relayed, so it always works but costs latency.
+const ICE_SERVERS = [
   { urls: 'stun:stun.l.google.com:19302' },
   { urls: 'stun:stun1.l.google.com:19302' },
-  { urls: 'stun:stun2.l.google.com:19302' },
-  { urls: 'stun:stun3.l.google.com:19302' },
-  { urls: 'stun:stun4.l.google.com:19302' },
+  { urls: 'stun:stun.cloudflare.com:3478' },
+  { urls: 'turn:openrelay.metered.ca:80', username: 'openrelayproject', credential: 'openrelayproject' },
+  { urls: 'turn:openrelay.metered.ca:443', username: 'openrelayproject', credential: 'openrelayproject' },
+  { urls: 'turn:openrelay.metered.ca:443?transport=tcp', username: 'openrelayproject', credential: 'openrelayproject' },
 ];
 
 // Connect to the PeerJS server we self-host on the same origin (mounted at
@@ -36,7 +41,7 @@ function peerOptions() {
     port,
     path: '/peerjs',
     secure,
-    config: { iceServers: STUN_SERVERS },
+    config: { iceServers: ICE_SERVERS },
   };
 }
 
@@ -89,6 +94,18 @@ export default function VideoCall({ roomId, userName }: VideoCallProps) {
         pendingRef.current.delete(peerId);
         refreshPeers();
       });
+      // Drop a tile only once the underlying ICE connection truly fails/closes
+      // ('disconnected' can recover, so we don't act on it).
+      const pc = call.peerConnection;
+      if (pc) {
+        pc.addEventListener('iceconnectionstatechange', () => {
+          if (pc.iceConnectionState === 'failed' || pc.iceConnectionState === 'closed') {
+            peersRef.current.delete(peerId);
+            pendingRef.current.delete(peerId);
+            refreshPeers();
+          }
+        });
+      }
     };
 
     const callPeer = (peerId: string, name: string) => {
@@ -130,10 +147,19 @@ export default function VideoCall({ roomId, userName }: VideoCallProps) {
         });
     });
 
+    // The broker link dropped (idle reverse-proxy, network blip) but the peer
+    // wasn't destroyed — reconnect instead of showing "Lost connection".
+    p.on('disconnected', () => {
+      if (!p.destroyed) {
+        try { p.reconnect(); } catch { /* ignore */ }
+      }
+    });
+
     p.on('error', (err) => {
-      // ICE/peer-unavailable errors are transient; only surface fatal ones.
+      // Transient errors are handled elsewhere (peer-unavailable = that peer not
+      // ready yet; network/disconnected = the reconnect handler retries).
       const type = (err as unknown as { type?: string }).type;
-      if (type === 'peer-unavailable') return;
+      if (type === 'peer-unavailable' || type === 'network' || type === 'disconnected') return;
       setConnecting(false);
       setCallError('Call connection failed: ' + (err.message || 'peer server unreachable'));
       setInCall(false);

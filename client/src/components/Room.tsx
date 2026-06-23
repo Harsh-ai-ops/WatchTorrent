@@ -36,8 +36,11 @@ export default function Room({ roomId, userName, onLeave }: RoomProps) {
   const [torrentLoading, setTorrentLoading] = useState(false);
   const [torrentError, setTorrentError] = useState('');
   const [torrentProgress, setTorrentProgress] = useState<{ peers: number; progress: number; speed: number } | null>(null);
-  const [activePanel, setActivePanel] = useState<'chat' | 'users' | 'call' | null>('chat');
-  const [sidebarOpen, setSidebarOpen] = useState(true);
+  // On phones the sidebar is a full-height overlay, so start it closed (showing
+  // the video first); on desktop it sits beside the video, so start on chat.
+  const [activePanel, setActivePanel] = useState<'chat' | 'users' | 'call' | null>(
+    () => (typeof window !== 'undefined' && window.innerWidth < 768 ? null : 'chat')
+  );
   const socketRef = useRef(getSocket());
 
   const requestStreamUrl = useCallback((roomId: string) => {
@@ -99,6 +102,27 @@ export default function Room({ roomId, userName, onLeave }: RoomProps) {
     socket.on('file-selected', onFileSelected);
     socket.on('torrent-progress', onProgress);
     socket.on('connect', onReconnect);
+
+    // Pull current room state on mount. The server emits torrent-ready/
+    // file-selected during join-room — which runs in the Landing view, BEFORE
+    // these listeners exist — so a joiner would otherwise miss them and stay on
+    // the blank paste-magnet page. This adopts the host's existing selection
+    // (no re-broadcast) and starts the stream.
+    socket.emit('get-room-state', { roomId }, (res: any) => {
+      if (res?.users) setUsers(res.users);
+      const t = res?.torrent;
+      if (t) {
+        setTorrentName(t.name || '');
+        setTorrentInfoHash(t.infoHash || '');
+        setFiles(t.files || []);
+        setTorrentLoading(false);
+        const sel = t.selectedFile || (t.files || []).find((f: TorrentFile) => f.type === 'video');
+        if (sel) {
+          setSelectedFile(sel);
+          requestStreamUrl(roomId);
+        }
+      }
+    });
 
     return () => {
       socket.off('user-joined', onUserJoined);
@@ -251,11 +275,12 @@ export default function Room({ roomId, userName, onLeave }: RoomProps) {
               </div>
             </div>
           ) : (
-            <div className="relative flex-1">
+            <div className="relative flex-1 flex min-h-0">
               <VideoPlayer
                 streamUrl={streamUrl}
                 roomId={roomId}
                 userName={userName}
+                fileName={selectedFile?.name}
                 subtitleUrls={torrentInfoHash ? files
                   .filter((f) => f.type === 'subtitle')
                   .map((f) => ({
@@ -278,7 +303,7 @@ export default function Room({ roomId, userName, onLeave }: RoomProps) {
           )}
         </div>
 
-        {sidebarOpen && activePanel && (
+        {activePanel && (
           <>
             <div className="fixed inset-0 top-[49px] bg-black/50 z-10 md:hidden" onClick={() => setActivePanel(null)} />
             <aside className="w-80 bg-zinc-900 border-l border-zinc-800 flex flex-col shrink-0 max-md:fixed max-md:right-0 max-md:top-[49px] max-md:bottom-0 max-md:w-[85vw] max-md:max-w-[20rem] max-md:z-20 max-md:shadow-2xl max-md:animate-slide-in">
@@ -288,7 +313,11 @@ export default function Room({ roomId, userName, onLeave }: RoomProps) {
                   {activePanel === 'users' && `Users (${users.length})`}
                   {activePanel === 'call' && 'Video Call'}
                 </span>
-                <button onClick={() => setActivePanel(null)} className="text-zinc-500 hover:text-white p-1 cursor-pointer md:hidden">
+                <button
+                  onClick={() => setActivePanel(null)}
+                  aria-label="Close panel"
+                  className="md:hidden -mr-1 p-1.5 text-zinc-300 hover:text-white text-xl leading-none cursor-pointer"
+                >
                   ✕
                 </button>
               </div>
