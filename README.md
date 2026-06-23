@@ -1,3 +1,13 @@
+---
+title: Watchtorrent
+emoji: 🐢
+colorFrom: gray
+colorTo: indigo
+sdk: docker
+pinned: false
+app_port: 3000
+---
+
 # WatchTorrent
 
 Watch torrents together with friends in perfect sync. Paste a magnet link, create a room, and everyone watches the same video with synchronized playback, chat, and video calls.
