@@ -4,7 +4,7 @@ import VideoPlayer from './VideoPlayer.tsx';
 import Chat from './Chat.tsx';
 import VideoCall from './VideoCall.tsx';
 import MagnetInput from './MagnetInput.tsx';
-import { FiUsers, FiMessageSquare, FiVideo, FiLogOut, FiMonitor, FiFileText, FiMusic, FiFilm } from 'react-icons/fi';
+import { FiUsers, FiMessageSquare, FiVideo, FiLogOut, FiMonitor, FiFileText, FiMusic, FiFilm, FiLink, FiCheck } from 'react-icons/fi';
 import { formatBytes } from '../lib/utils.ts';
 
 interface RoomProps {
@@ -41,7 +41,21 @@ export default function Room({ roomId, userName, onLeave }: RoomProps) {
   const [activePanel, setActivePanel] = useState<'chat' | 'users' | 'call' | null>(
     () => (typeof window !== 'undefined' && window.innerWidth < 768 ? null : 'chat')
   );
+  const [copied, setCopied] = useState(false);
   const socketRef = useRef(getSocket());
+
+  // Copy the one-click invite link (current URL already carries ?room=CODE).
+  const copyInvite = useCallback(() => {
+    const link = window.location.href;
+    const done = () => { setCopied(true); setTimeout(() => setCopied(false), 1600); };
+    if (navigator.clipboard?.writeText) {
+      navigator.clipboard.writeText(link).then(done).catch(() => {
+        window.prompt('Copy this invite link:', link);
+      });
+    } else {
+      window.prompt('Copy this invite link:', link);
+    }
+  }, []);
 
   const requestStreamUrl = useCallback((roomId: string) => {
     const socket = socketRef.current;
@@ -174,13 +188,23 @@ export default function Room({ roomId, userName, onLeave }: RoomProps) {
   return (
     <div className="h-[100dvh] overflow-hidden flex flex-col bg-zinc-950">
       <header className="relative z-30 flex items-center justify-between px-3 sm:px-4 py-2 bg-zinc-900/80 backdrop-blur border-b border-zinc-800 shrink-0">
-        <div className="flex items-center gap-3 min-w-0">
+        <div className="flex items-center gap-2 sm:gap-3 min-w-0">
           <span className="text-purple-400 font-bold shrink-0">WT</span>
-          <span className="text-zinc-300 text-sm truncate">
+          <span className="text-zinc-300 text-sm truncate hidden sm:inline">
             Room: <span className="text-white font-mono tracking-wider">{roomId}</span>
           </span>
+          <button
+            onClick={copyInvite}
+            title="Copy invite link to share with friends"
+            className={`shrink-0 flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-medium transition-colors cursor-pointer ${
+              copied ? 'bg-green-600/20 text-green-300' : 'bg-purple-600/20 text-purple-300 hover:bg-purple-600/30'
+            }`}
+          >
+            {copied ? <FiCheck className="w-3.5 h-3.5" /> : <FiLink className="w-3.5 h-3.5" />}
+            {copied ? 'Copied!' : 'Invite'}
+          </button>
           {torrentName && (
-            <span className="text-zinc-500 text-sm truncate hidden sm:block">
+            <span className="text-zinc-500 text-sm truncate hidden md:block">
               | {torrentName}
             </span>
           )}

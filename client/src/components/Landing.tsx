@@ -5,12 +5,15 @@ import { FiArrowRight, FiUsers } from 'react-icons/fi';
 
 interface LandingProps {
   onEnter: (roomId: string, userName: string) => void;
+  initialRoom?: string;
 }
 
-export default function Landing({ onEnter }: LandingProps) {
-  const [mode, setMode] = useState<'home' | 'create' | 'join'>('home');
+export default function Landing({ onEnter, initialRoom }: LandingProps) {
+  // If we arrived via an invite link (?room=CODE), open straight on the join
+  // screen with the code pre-filled — friend just confirms their name.
+  const [mode, setMode] = useState<'home' | 'create' | 'join'>(initialRoom ? 'join' : 'home');
   const [userName, setUserName] = useState(generateName());
-  const [joinCode, setJoinCode] = useState('');
+  const [joinCode, setJoinCode] = useState(initialRoom || '');
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
 

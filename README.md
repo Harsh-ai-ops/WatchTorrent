@@ -24,7 +24,23 @@ Watch torrents together with friends in perfect sync. Paste a magnet link, creat
 - **Cinema UI** - Dark, minimal design focused on the video
 - **Mobile Ready** - Responsive layout works on all devices
 
-## Quick Start
+## Easiest way — one-click host (Windows, no terminal)
+
+Run it on your own machine (so torrents actually work) and get a public link to
+share. **Just double-click `Start Watch Party.bat`.** It installs/builds on the
+first run, starts the server, opens a free public link (via Cloudflare — no
+account), and launches the app. Then:
+
+1. Click **Create a Room** and paste your magnet / torrent link.
+2. Click **Invite** to copy the room link and send it to friends.
+3. They click the link → drop straight into your synced room (playback + chat +
+   video/audio calls). Keep the window open during the party.
+
+> The public link uses a free Cloudflare quick-tunnel — perfect for a few
+> friends. For heavy/long sessions, a small VPS or your own domain tunnel is
+> sturdier.
+
+## Manual start
 
 ```bash
 git clone <repo>
