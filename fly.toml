@@ -12,8 +12,8 @@
 # metered.ca, then:
 #   fly secrets set TURN_URL="turn:host:3478,turns:host:5349" TURN_USERNAME="u" TURN_CREDENTIAL="p"
 
-app = "watchtorrent"
-primary_region = "iad"
+app = "watchtorrent-harsh"
+primary_region = "cdg"
 
 [build]
   dockerfile = "Dockerfile"
