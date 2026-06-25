@@ -262,7 +262,7 @@ export default function VideoCall({ roomId, userName }: VideoCallProps) {
         </div>
         {peers.map((p) => (
           <div key={p.id} className="relative aspect-video bg-zinc-800 rounded-lg overflow-hidden">
-            <video autoPlay playsInline className="w-full h-full object-cover" ref={(el) => { if (el && el.srcObject !== p.stream) el.srcObject = p.stream; }} />
+            <video autoPlay playsInline className="w-full h-full object-cover" ref={(el) => { if (el && el.srcObject !== p.stream) { el.srcObject = p.stream; el.play?.().catch(() => {}); } }} />
             <span className="absolute bottom-1 left-1 text-[10px] bg-black/60 px-1.5 py-0.5 rounded text-zinc-300">{p.name}</span>
           </div>
         ))}

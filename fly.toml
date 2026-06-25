@@ -1,0 +1,36 @@
+# fly.toml — deploy WatchTorrent to Fly.io (allows the UDP + inbound that real
+# torrenting needs, unlike Hugging Face / Render).
+#
+# Deploy in 4 steps:
+#   1. Install flyctl:  https://fly.io/docs/flyctl/install/
+#   2. fly auth login
+#   3. fly launch --copy-config --name watchtorrent-<your-suffix> --region iad --now
+#        (pick a globally-unique name; --copy-config reuses this file)
+#   4. done — `fly open` to view it.
+#
+# Optional: reliable video calls across any network (TURN). Get free creds at
+# metered.ca, then:
+#   fly secrets set TURN_URL="turn:host:3478,turns:host:5349" TURN_USERNAME="u" TURN_CREDENTIAL="p"
+
+app = "watchtorrent"
+primary_region = "iad"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  NODE_ENV = "production"
+  PORT = "3000"
+
+[http_service]
+  internal_port = 3000
+  force_https = true
+  # Spin down when idle to stay within the free allowance; an active watch party
+  # keeps a websocket open, so it won't stop mid-session.
+  auto_stop_machines = "stop"
+  auto_start_machines = true
+  min_machines_running = 0
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "1gb"

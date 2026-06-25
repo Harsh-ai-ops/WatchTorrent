@@ -44,6 +44,7 @@ export default function VideoPlayer({ streamUrl, roomId, userName, fileName, pro
   const transcodeRef = useRef(false);
   const resumePlayRef = useRef(false);
   const resumeAtRef = useRef(0);
+  const dlProgressRef = useRef<{ peers: number; speed: number; downloaded?: number } | null>(null);
   const socket = getSocket();
 
   const [paused, setPaused] = useState(true);
@@ -73,10 +74,13 @@ export default function VideoPlayer({ streamUrl, roomId, userName, fileName, pro
 
   const ext = fileName?.split('.').pop()?.toLowerCase() || '';
   const riskyContainer = RISKY_EXTS.includes(ext);
-  // Route browser-hostile containers/codecs through the server transcoder, which
-  // emits a fresh 0-based fragmented-MP4 segment per `?start=`. So absolute movie
-  // time = base + <video>.currentTime, and the total duration comes from /probe.
-  const transcode = riskyContainer || forceTranscode;
+  // NATIVE-FIRST: always try to play the raw file directly. Only switch to the
+  // server transcoder if the browser actually fails to decode it (decode error,
+  // or the watchdog below). So MP4 — and H.264 .mkv in Chrome — play with ZERO
+  // conversion; conversion is a last resort, not the default.
+  // Transcoded segments are fresh 0-based fragmented MP4 per `?start=`, so
+  // absolute movie time = base + <video>.currentTime, duration from /probe.
+  const transcode = forceTranscode;
   const transcodeUrl = streamUrl.replace('/stream/', '/transcode/');
   const probeUrl = streamUrl.replace('/stream/', '/probe/');
 
@@ -93,6 +97,7 @@ export default function VideoPlayer({ streamUrl, roomId, userName, fileName, pro
   // Keep refs fresh for closures that outlive a render.
   transcodeRef.current = transcode;
   totalDurRef.current = totalDur;
+  dlProgressRef.current = progress || null;
 
   // Absolute movie position right now (handles the transcode base offset).
   function absNow() { return (transcodeRef.current ? baseRef.current : 0) + (el()?.currentTime || 0); }
@@ -132,7 +137,25 @@ export default function VideoPlayer({ streamUrl, roomId, userName, fileName, pro
     setReloadKey(0);
     setExtDur(0);
     requestedSync.current = false;
+    transcodeFails.current = 0;
   }, [streamUrl]);
+
+  // Watchdog for the native-first path: a risky container (mkv/avi/…) that some
+  // browsers can't decode may just stall WITHOUT firing an 'error'. So if, after
+  // a grace period, it still isn't playable but we HAVE pulled real data, assume
+  // the browser can't decode it and fall back to transcoding. Gated on bytes
+  // downloaded so a merely slow swarm doesn't trigger pointless conversion.
+  useEffect(() => {
+    if (forceTranscode || !riskyContainer) return;
+    const t = setTimeout(() => {
+      const v = el();
+      const dl = dlProgressRef.current?.downloaded ?? 0;
+      if (v && v.readyState < 2 && !v.error && dl > 3 * 1024 * 1024) {
+        setForceTranscode(true);
+      }
+    }, 12000);
+    return () => clearTimeout(t);
+  }, [forceTranscode, riskyContainer, streamUrl]);
 
   // For transcoded files, fetch the real total duration (the per-segment
   // <video>.duration only covers from the current offset onward).

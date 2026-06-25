@@ -18,31 +18,16 @@ const PUBLIC_TRACKERS = [
   'http://tracker.bittorrent.am:80/announce',
 ];
 
-const DHT_BOOTSTRAP = [
-  'router.bittorrent.com:6881',
-  'dht.transmissionbt.com:6881',
-  'router.utorrent.com:6881',
-  'dht.aelitis.com:6881',
-  'router.silotis.us:6881',
-  'dht.libtorrent.org:25401',
-];
-
 // How many torrents to keep in memory at once (LRU eviction beyond this).
 const MAX_TORRENTS = 5;
 
 export class TorrentEngine {
   constructor() {
-    this.client = new WebTorrent({
-      dht: { bootstrap: DHT_BOOTSTRAP },
-      tracker: true,
-      maxConns: 200,
-      // µTP is UDP-based; many hosts (incl. Hugging Face Spaces) block UDP, so
-      // it just wastes connection attempts. Stick to TCP, which works outbound.
-      utp: false,
-      upload: true,
-      download: true,
-      webSeeds: true,
-    });
+    // Use WebTorrent's defaults — they're battle-tested and use EVERY available
+    // way to find/reach peers (DHT, trackers, µTP, TCP, web seeds). A previous
+    // attempt to "optimise for Hugging Face" (utp:false, custom DHT) actually
+    // reduced peer connectivity, so we keep only a higher connection cap.
+    this.client = new WebTorrent({ maxConns: 100 });
     this.torrents = new Map();
     this.pending = new Map();
     this._selected = new Map(); // infoHash -> last selected fileIndex (dedupe)
